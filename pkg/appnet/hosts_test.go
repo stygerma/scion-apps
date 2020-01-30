@@ -16,57 +16,34 @@ package appnet
 
 import (
 	"fmt"
-	"sort"
 	"testing"
 
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/snet"
 )
 
-func init() {
-	// Trick into thinking that /etc/hosts is already loaded
-	loadHostsOnce.Do(func() {
-		hostsTableInstance = loadHostsFile("hosts_test_file")
-	})
-}
+const hostsTestFile = "hosts_test_file"
 
 func TestCount(t *testing.T) {
-	count := len(hosts().byName)
-	if count != 5 {
-		t.Errorf("wrong number of hosts in map, expected: %v, got: %v", 5, count)
-	}
 
-	count = len(hosts().byAddr["17-ffaa:0:1,[192.168.1.1]"])
-	if count != 3 {
-		t.Errorf("wrong number of addresses in list, expected: %v, got: %v", 3, count)
-	}
-}
-
-func TestAddingHost(t *testing.T) {
-	host := "host5"
-	addr := "20-ffaa:3:4,[12.34.56.0]"
-
-	// can add new host/addr
-	err := AddHost(host, addr)
+	hosts, err := loadHostsFile(hostsTestFile)
 	if err != nil {
-		t.Error(err)
+		t.Fatal("error loading test file", err)
 	}
 
-	// cannot add host twice
-	err = AddHost(host, addr)
-	if err == nil {
-		t.Error("added host with same name twice")
-	}
-
-	// can add different host with same address
-	host = "host6"
-	err = AddHost(host, addr)
-	if err != nil {
-		t.Error(err)
+	if len(hosts) != 5 {
+		t.Errorf("wrong number of hosts in map, expected: %v, got: %v", 5, len(hosts))
 	}
 }
 
 func TestReadHosts(t *testing.T) {
+
+	resolvers := resolverList{
+		&hostsfileResolver{"non_existent_hosts_file"},
+		&hostsfileResolver{hostsTestFile},
+		&hostsfileResolver{"another_non_existent_host_file"},
+	}
+
 	cases := []struct {
 		name     string
 		expected snet.SCIONAddress
@@ -82,7 +59,7 @@ func TestReadHosts(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		actual, err := GetHostByName(c.name)
+		actual, err := resolvers.Resolve(c.name)
 		if c.expected.Host == nil {
 			if err == nil {
 				t.Errorf("no result expected for '%s', got %v", c.name, actual)
@@ -93,49 +70,6 @@ func TestReadHosts(t *testing.T) {
 			}
 			if c.expected.IA != actual.IA || !c.expected.Host.Equal(actual.Host) {
 				t.Errorf("wrong result for '%s', expected %v, got %v", c.name, c.expected, actual)
-			}
-		}
-	}
-}
-
-func TestReadAddresses(t *testing.T) {
-
-	equalSet := func(a, b []string) bool {
-		sort.Strings(a)
-		sort.Strings(b)
-		if len(a) != len(b) {
-			return false
-		}
-		for i := range a {
-			if a[i] != b[i] {
-				return false
-			}
-		}
-		return true
-	}
-
-	cases := []struct {
-		addr     snet.SCIONAddress
-		expected []string
-	}{
-		{mustParse("18-ffaa:1:2,[10.0.8.10]"), []string{"host2"}},
-		{mustParse("17-ffaa:0:1,[192.168.1.1]"), []string{"host1.1", "host1.2", "host3"}},
-		{mustParse("20-ffaa:c0ff:ee12,[::ff1:ce00:dead:10cc:baad:f00d]"), []string{"host4"}},
-		{mustParse("1-ff00:0:1,[1.0.0.1]"), nil},
-	}
-
-	for _, c := range cases {
-		names, err := GetHostnamesByAddress(c.addr)
-		if c.expected == nil {
-			if err == nil {
-				t.Errorf("no result expected for %v, got %v", c.addr, names)
-			}
-		} else {
-			if err != nil {
-				t.Error(err)
-			}
-			if !equalSet(names, c.expected) {
-				t.Errorf("wrong result for %v, expected %v, got %v", c.addr, c.expected, names)
 			}
 		}
 	}
