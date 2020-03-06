@@ -55,7 +55,7 @@ func main() {
 	serverCCAddr, err := snet.AddrFromString(serverCCAddrStr)
 	Check(err)
 	// get the daemon socket file path:
-	sciondPath := sciond.GetDefaultSCIONDPath(nil)
+	sciondPath := scionutil.GetSCIONDPath(&clientCCAddr.IA)
 	// initialize SCION
 	err = snet.Init(clientCCAddr.IA, sciondPath, dispatcherPath)
 	Check(err)
