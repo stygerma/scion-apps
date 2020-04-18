@@ -70,9 +70,9 @@ type BwtestResult struct {
 	ExpectedFinishTime time.Time
 }
 
-func Check(e error) {
+func Check(e error, pos int) {
 	if e != nil {
-		LogFatal("Fatal error. Exiting.", "err", e)
+		LogFatal("Fatal error. Exiting.", "err", e, "pos", pos)
 	}
 }
 
@@ -86,7 +86,7 @@ func LogFatal(msg string, a ...interface{}) {
 func PrgFill(key []byte, iv int, data []byte) {
 	i := uint32(iv)
 	aesCipher, err := aes.NewCipher(key)
-	Check(err)
+	Check(err, 1)
 	pt := make([]byte, aes.BlockSize)
 	j := 0
 	for j <= len(data)-aes.BlockSize {
@@ -108,7 +108,7 @@ func EncodeBwtestResult(res *BwtestResult, buf []byte) int {
 	var bb bytes.Buffer
 	enc := gob.NewEncoder(&bb)
 	err := enc.Encode(*res)
-	Check(err)
+	Check(err, 2)
 	copy(buf, bb.Bytes())
 	return bb.Len()
 }
@@ -128,7 +128,7 @@ func EncodeBwtestParameters(bwtp *BwtestParameters, buf []byte) int {
 	var bb bytes.Buffer
 	enc := gob.NewEncoder(&bb)
 	err := enc.Encode(*bwtp)
-	Check(err)
+	Check(err, 3)
 	copy(buf, bb.Bytes())
 	return bb.Len()
 }
@@ -186,7 +186,7 @@ func HandleDCConnSend(bwp *BwtestParameters, udpConnection *snet.Conn) {
 		// Place packet number at the beginning of the packet, overwriting some PRG data
 		binary.LittleEndian.PutUint32(sb, uint32(i*bwp.PacketSize))
 		_, err := udpConnection.Write(sb)
-		Check(err)
+		Check(err, 4)
 		i++
 	}
 }

@@ -39,7 +39,7 @@ import (
 )
 
 const (
-	DefaultBwtestParameters = "3,1000,30,80kbps"
+	DefaultBwtestParameters = "3,1000,30,80000kbps"
 	DefaultDuration         = 3
 	DefaultPktSize          = 1000
 	DefaultPktCount         = 30
@@ -54,9 +54,9 @@ var (
 func prepareAESKey() []byte {
 	key := make([]byte, 16)
 	n, err := rand.Read(key)
-	Check(err)
+	Check(err, 5)
 	if n != 16 {
-		Check(fmt.Errorf("Did not obtain 16 bytes of random information, only received %d", n))
+		Check(fmt.Errorf("Did not obtain 16 bytes of random information, only received %d", n), 6)
 	}
 	return key
 }
@@ -89,7 +89,7 @@ func parseBwtestParameters(s string) BwtestParameters {
 	a := strings.Split(s, ",")
 	if len(a) != 4 {
 		Check(fmt.Errorf("Incorrect number of arguments, need 4 values for bwtestparameters. "+
-			"You can use ? as wildcard, e.g. %s", DefaultBwtestParameters))
+			"You can use ? as wildcard, e.g. %s", DefaultBwtestParameters), 7)
 	}
 	wildcards := 0
 	for _, v := range a {
@@ -158,7 +158,7 @@ func parseBwtestParameters(s string) BwtestParameters {
 		if a2*a3*8/a1 > a4+a2*a1 || a2*a3*8/a1 < a4-a2*a1 {
 			Check(fmt.Errorf("Computed target bandwidth does not match parameters, "+
 				"use wildcard or specify correct bandwidth, expected %d, provided %d",
-				a2*a3*8/a1, a4))
+				a2*a3*8/a1, a4), 8)
 		}
 	}
 	key := prepareAESKey()
@@ -217,7 +217,7 @@ func getDuration(duration string) int64 {
 	}
 	d := time.Second * time.Duration(a1)
 	if d > MaxDuration {
-		Check(fmt.Errorf("Duration is exceeding MaxDuration: %d > %d", a1, MaxDuration/time.Second))
+		Check(fmt.Errorf("Duration is exceeding MaxDuration: %d > %d", a1, MaxDuration/time.Second), 9)
 		a1 = DefaultDuration
 	}
 	return a1
@@ -290,16 +290,16 @@ func main() {
 
 	if len(serverCCAddrStr) > 0 {
 		serverCCAddr, err = appnet.ResolveUDPAddr(serverCCAddrStr)
-		Check(err)
+		Check(err, 10)
 	} else {
 		printUsage()
-		Check(fmt.Errorf("Error, server address needs to be specified with -s"))
+		Check(fmt.Errorf("Error, server address needs to be specified with -s"), 11)
 	}
 
 	var path snet.Path
 	if interactive {
 		path, err = appnet.ChoosePathInteractive(serverCCAddr.IA)
-		Check(err)
+		Check(err, 12)
 	} else {
 		var metric int
 		if pathAlgo == "mtu" {
@@ -308,14 +308,14 @@ func main() {
 			metric = appnet.Shortest
 		}
 		path, err = appnet.ChoosePathByMetric(metric, serverCCAddr.IA)
-		Check(err)
+		Check(err, 13)
 	}
 	if path != nil {
 		appnet.SetPath(serverCCAddr, path)
 	}
 
 	CCConn, err = appnet.DialAddr(serverCCAddr)
-	Check(err)
+	Check(err, 14)
 
 	// get the port used by clientCC after it bound to the dispatcher (because it might be 0)
 	clientCCAddr := CCConn.LocalAddr().(*net.UDPAddr)
@@ -328,7 +328,7 @@ func main() {
 	// Data channel connection
 	DCConn, err = appnet.DefNetwork().Dial(
 		context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
-	Check(err)
+	Check(err, 15)
 
 	// update default packet size to max MTU on the selected path
 	if path != nil {
@@ -355,6 +355,11 @@ func main() {
 		int(clientBwp.BwtestDuration/time.Second), clientBwp.PacketSize, clientBwp.NumPackets)
 	fmt.Printf("server->client: %d seconds, %d bytes, %d packets\n",
 		int(serverBwp.BwtestDuration/time.Second), serverBwp.PacketSize, serverBwp.NumPackets)
+
+	hopfield, _ := path.Path().GetHopField(path.Path().HopOff)
+	infofield, _ := path.Path().GetInfoField(path.Path().InfOff)
+	fmt.Printf("We got the following path \n InfOff: %v \n HopOff: %v \n \n",
+		infofield, hopfield)
 
 	t := time.Now()
 	expFinishTimeSend := t.Add(serverBwp.BwtestDuration + MaxRTT + GracePeriodSend)
@@ -389,10 +394,10 @@ func main() {
 	var numtries int64 = 0
 	for numtries < MaxTries {
 		_, err = CCConn.Write(pktbuf[:l])
-		Check(err)
+		Check(err, 16)
 
 		err = CCConn.SetReadDeadline(time.Now().Add(MaxRTT))
-		Check(err)
+		Check(err, 17)
 		n, err = CCConn.Read(pktbuf)
 		if err != nil {
 			// A timeout likely happened, see if we should adjust the expected finishing time
@@ -408,7 +413,7 @@ func main() {
 		}
 		// Remove read deadline
 		err = CCConn.SetReadDeadline(tzero)
-		Check(err)
+		Check(err, 18)
 
 		if n != 2 {
 			fmt.Println("Incorrect server response, trying again")
@@ -434,7 +439,7 @@ func main() {
 	}
 
 	if numtries == MaxTries {
-		Check(fmt.Errorf("Error, could not receive a server response, MaxTries attempted without success."))
+		Check(fmt.Errorf("Error, could not receive a server response, MaxTries attempted without success."), 19)
 	}
 
 	go HandleDCConnSend(&clientBwp, DCConn)
@@ -447,6 +452,7 @@ func main() {
 	fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
 	fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
 	fmt.Println("Loss rate:", (serverBwp.NumPackets-res.CorrectlyReceived)*100/serverBwp.NumPackets, "%")
+	fmt.Printf("Number of packets received %d\n", res.CorrectlyReceived)
 	variance := res.IPAvar
 	average := res.IPAavg
 	fmt.Printf("Interarrival time variance: %dms, average interarrival time: %dms\n",
@@ -460,10 +466,10 @@ func main() {
 		pktbuf[0] = 'R'
 		copy(pktbuf[1:], clientBwp.PrgKey)
 		_, err = CCConn.Write(pktbuf[:1+len(clientBwp.PrgKey)])
-		Check(err)
+		Check(err, 20)
 
 		err = CCConn.SetReadDeadline(time.Now().Add(MaxRTT))
-		Check(err)
+		Check(err, 21)
 		n, err = CCConn.Read(pktbuf)
 		if err != nil {
 			numtries++
@@ -471,7 +477,7 @@ func main() {
 		}
 		// Remove read deadline
 		err = CCConn.SetReadDeadline(tzero)
-		Check(err)
+		Check(err, 22)
 
 		if n < 2 {
 			numtries++
@@ -484,7 +490,7 @@ func main() {
 		if pktbuf[1] != byte(0) {
 			// Error case
 			if pktbuf[1] == byte(127) {
-				Check(fmt.Errorf("Results could not be found or PRG key was incorrect, abort"))
+				Check(fmt.Errorf("Results could not be found or PRG key was incorrect, abort"), 23)
 			}
 			// pktbuf[1] contains number of seconds to wait for results
 			fmt.Println("We need to sleep for", pktbuf[1], "seconds before we can get the results")
@@ -515,7 +521,9 @@ func main() {
 		ach = 8 * clientBwp.PacketSize * sres.CorrectlyReceived / int64(clientBwp.BwtestDuration/time.Second)
 		fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
 		fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
+		fmt.Printf("Number of packets received: %v\n", sres.NumPacketsReceived)
 		fmt.Println("Loss rate:", (clientBwp.NumPackets-sres.CorrectlyReceived)*100/clientBwp.NumPackets, "%")
+		fmt.Printf("Number of packets received %d\n", sres.CorrectlyReceived)
 		variance := sres.IPAvar
 		average := sres.IPAavg
 		fmt.Printf("Interarrival time variance: %dms, average interarrival time: %dms\n",

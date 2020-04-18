@@ -18,7 +18,7 @@ setup_lint:
 
 lint:
 	@type golangci-lint > /dev/null || ( echo "golangci-lint not found. Install it manually or by running 'make setup_lint'."; exit 1 )
-	golangci-lint run
+	golangci-lint run || true
 
 install: all
 	@$(foreach d,$(SRCDIRS), cd $(ROOT_DIR)/$(d); cp $(shell basename $(d)) ~/go/bin;)

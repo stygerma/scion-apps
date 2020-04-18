@@ -91,7 +91,6 @@ func main() {
 }
 
 func runServer(port uint16) error {
-
 	conn, err := appnet.ListenPort(port)
 	if err != nil {
 		return err
@@ -139,7 +138,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 		if receivePacketBuffer[0] == 'N' {
 			// New bwtest request
 			if len(currentBwtest) != 0 {
-				fmt.Println("A bwtest is already ongoing")
+				fmt.Println("A bwtest is already ongoing", clientCCAddrStr)
 				if clientCCAddrStr == currentBwtest {
 					// The request is from the same client for which the current test is already ongoing
 					// If the response packet was dropped, then the client would send another request
