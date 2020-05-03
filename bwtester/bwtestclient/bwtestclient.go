@@ -34,9 +34,10 @@ import (
 
 	. "github.com/netsec-ethz/scion-apps/bwtester/bwtestlib"
 	"github.com/netsec-ethz/scion-apps/pkg/appnet"
+
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/snet"
-)
+) //"github.com/scionproto/scion/bazel-scion/external/com_github_prometheus_common/log"
 
 const (
 	DefaultBwtestParameters = "3,1000,30,80000kbps"
@@ -328,7 +329,7 @@ func main() {
 	// Data channel connection
 	DCConn, err = appnet.DefNetwork().Dial(
 		context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
-	Check(err, 15)
+	Check(err, 15) //MS: often happens
 
 	// update default packet size to max MTU on the selected path
 	if path != nil {
@@ -380,10 +381,8 @@ func main() {
 		// sender is also done
 		res.ExpectedFinishTime = expFinishTimeSend
 	}
-
 	receiveDone.Lock()
 	go HandleDCConnReceive(&serverBwp, DCConn, &res, &resLock, &receiveDone)
-
 	pktbuf := make([]byte, 2000)
 	pktbuf[0] = 'N' // Request for new bwtest
 	n := EncodeBwtestParameters(&clientBwp, pktbuf[1:])

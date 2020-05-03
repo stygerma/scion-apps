@@ -17,7 +17,9 @@ require (
 	github.com/netsec-ethz/rains v0.1.0
 	github.com/scionproto/scion v0.5.0
 	github.com/smartystreets/goconvey v1.6.4
-	golang.org/x/crypto v0.0.0-20190909091759-094676da4a83
+	golang.org/x/crypto v0.0.0-20191011191535-87dc89f01550
 	golang.org/x/image v0.0.0-20191009234506-e7c1f5e7dbb8
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
 )
+
+replace github.com/scionproto/scion => /home/marc/go/src/github.com/scionproto/scion
