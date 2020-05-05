@@ -1,6 +1,6 @@
 #!/bin/bash
 
-./buildApps.sh
+./buildAll.sh
 
 cd $SC
 

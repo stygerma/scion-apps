@@ -41,6 +41,11 @@ var (
 	resultsMap     map[string]*DemoappResult
 	resultsMapLock sync.Mutex
 	currentdemoapp string // Contains connection parameters, in case server's ack packet was lost
+	enderReceive   chan struct{}
+	enderSend      chan struct{}
+	enderCompleted bool
+	// enderReceive   bool
+	// enderSend      bool
 )
 
 // Deletes the old entries in resultsMap
@@ -136,6 +141,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 		fmt.Println("Received request:", clientCCAddrStr)
 
 		if receivePacketBuffer[0] == 'N' {
+			fmt.Println("New demoapp request")
 			// New demoapp request
 			if len(currentdemoapp) != 0 {
 				fmt.Println("A demoapp is already ongoing", clientCCAddrStr)
@@ -189,6 +195,10 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				// Do not send a response packet for malformed request
 				continue
 			}
+			//ensure that channels are empty
+			enderReceive = make(chan struct{})
+			enderSend = make(chan struct{})
+			enderCompleted = false
 
 			// Address of client Data Connection (DC)
 			clientDCAddr := clientCCAddr.Copy()
@@ -242,8 +252,8 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			resultsMapLock.Unlock()
 
 			// go HandleDCConnReceive(clientBwp, DCConn, resChan)
-			go HandleDCConnReceive(clientBwp, DCConn, &bres, &resultsMapLock, nil)
-			go HandleDCConnSend(serverBwp, DCConn)
+			go HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, nil) //, &enderReceive
+			go HandleDCConnSendServer(serverBwp, DCConn)                                 //, &enderSend
 
 			// Send back success
 			sendPacketBuffer[0] = 'N'
@@ -253,6 +263,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// Everything succeeded, now set variable that demoapp is ongoing
 			currentdemoapp = clientCCAddrStr
 		} else if receivePacketBuffer[0] == 'R' {
+			fmt.Println("want the resultstime:", time.Now().Format("2006-01-02 15:04:05.000000"))
 			// This is a request for the results
 			sendPacketBuffer[0] = 'R'
 			// Make sure that the client is known and that the results are ready
@@ -261,6 +272,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				// There are no results for this client, return an error
 				sendPacketBuffer[1] = byte(127)
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:2], clientCCAddr)
+				fmt.Println("No new results for this client")
 				continue
 			}
 			// Make sure the PRG key is correct
@@ -268,8 +280,20 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				// Error, the sent PRG is incorrect
 				sendPacketBuffer[1] = byte(127)
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:2], clientCCAddr)
+				fmt.Println("PRG key is incorrect ")
 				continue
 			}
+			//Client is known and PRG key correct, client wants to end connection
+			// enderReceive = true
+			// enderSend = true
+			fmt.Println("trying to send Ender signal time:", time.Now().Format("2006-01-02 15:04:05.000000"))
+
+			if !enderCompleted {
+				close(enderReceive)
+				close(enderSend)
+				enderCompleted = true
+			}
+			fmt.Println("Ender signal sent time:", time.Now().Format("2006-01-02 15:04:05.000000"))
 			// Note: it would be better to have the resultsMap key consist only of the PRG key,
 			// so that a repeated demoapp from the same client with the same port gets a
 			// different resultsMap entry. However, in practice, a client would not run concurrent
@@ -281,15 +305,19 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 					// The results should be ready, but are not yet written into the data
 					// structure, so let's let client wait for 1 second
 					sendPacketBuffer[1] = byte(1)
-				} else {
-					sendPacketBuffer[1] = byte(v.ExpectedFinishTime.Sub(t)/time.Second) + 1
 				}
+				// else {
+				// 	sendPacketBuffer[1] = byte(v.ExpectedFinishTime.Sub(t)/time.Second) + 1
+				// }
+				v.ExpectedFinishTime = time.Now()
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:n], clientCCAddr)
+				fmt.Println("Results are not ready yet time:", time.Now().Format("2006-01-02 15:04:05.000000"))
 				continue
 			}
 			sendPacketBuffer[1] = byte(0)
 			n = EncodeDemoappResult(v, sendPacketBuffer[2:])
 			_, _ = CCConn.WriteTo(sendPacketBuffer[:n+2], clientCCAddr)
+			fmt.Println("Sent the results")
 		}
 	}
 }
