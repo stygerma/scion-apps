@@ -217,23 +217,29 @@ func HandleDCConnSendServer(bwp *DemoappParameters, udpConnection *snet.Conn) ch
 			interPktInterval = bwp.DemoappDuration
 		}
 		for i < bwp.NumPackets {
-			// Compute how long to wait
-			t1 := time.Now()
-			if t1.After(finish) {
-				// We've been sending for too long, sending bandwidth must be insufficient. Abort sending.
+			select {
+			case <-ender:
 				return
+			default:
+
+				// Compute how long to wait
+				t1 := time.Now()
+				if t1.After(finish) {
+					// We've been sending for too long, sending bandwidth must be insufficient. Abort sending.
+					return
+				}
+				t2 := t0.Add(interPktInterval * time.Duration(i))
+				if t1.Before(t2) {
+					time.Sleep(t2.Sub(t1))
+				}
+				// Send packet now
+				PrgFill(bwp.PrgKey, int(i*bwp.PacketSize), sb)
+				// Place packet number at the beginning of the packet, overwriting some PRG data
+				binary.LittleEndian.PutUint32(sb, uint32(i*bwp.PacketSize))
+				_, err := udpConnection.Write(sb)
+				Check(err, 4)
+				i++
 			}
-			t2 := t0.Add(interPktInterval * time.Duration(i))
-			if t1.Before(t2) {
-				time.Sleep(t2.Sub(t1))
-			}
-			// Send packet now
-			PrgFill(bwp.PrgKey, int(i*bwp.PacketSize), sb)
-			// Place packet number at the beginning of the packet, overwriting some PRG data
-			binary.LittleEndian.PutUint32(sb, uint32(i*bwp.PacketSize))
-			_, err := udpConnection.Write(sb)
-			Check(err, 4)
-			i++
 		}
 	}()
 	return ender
