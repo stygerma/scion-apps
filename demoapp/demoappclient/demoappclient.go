@@ -32,11 +32,11 @@ import (
 	"time"
 	"unicode"
 
-	log "github.com/inconshreveable/log15"
 	. "github.com/netsec-ethz/scion-apps/demoapp/demoapplib"
 	"github.com/netsec-ethz/scion-apps/pkg/appnet"
 
 	"github.com/scionproto/scion/go/lib/addr"
+	"github.com/scionproto/scion/go/lib/log"
 	"github.com/scionproto/scion/go/lib/snet"
 	"github.com/scionproto/scion/go/lib/sock/reliable"
 ) //"github.com/scionproto/scion/bazel-scion/external/com_github_prometheus_common/log"
@@ -49,14 +49,12 @@ const (
 	DefaultBW                = 3000
 	WildcardChar             = "?"
 	DefaultIterations        = 5
+	DefaultStopValue         = 50
 	MaxRTT                   = time.Millisecond * 1000
 )
 
 var (
-	InferedPktSize      int64
-	expectedPktReceived int64
-	actualDuration      time.Duration
-	interPktInterval    time.Duration
+	InferedPktSize int64
 )
 
 func prepareAESKey() []byte {
@@ -64,7 +62,7 @@ func prepareAESKey() []byte {
 	n, err := rand.Read(key)
 	Check(err, 5)
 	if n != 16 {
-		Check(fmt.Errorf("did not obtain 16 bytes of random information, only received %d", n), 6)
+		Check(fmt.Errorf("Did not obtain 16 bytes of random information, only received %d", n), 6)
 	}
 	return key
 }
@@ -96,7 +94,7 @@ func parseDemoappParameters(s string) DemoappParameters {
 	}
 	a := strings.Split(s, ",")
 	if len(a) != 4 {
-		Check(fmt.Errorf("incorrect number of arguments, need 4 values for DemoappParameters. "+
+		Check(fmt.Errorf("Incorrect number of arguments, need 4 values for demoappparameters. "+
 			"You can use ? as wildcard, e.g. %s", DefaultDemoappParameters), 7)
 	}
 	wildcards := 0
@@ -164,7 +162,7 @@ func parseDemoappParameters(s string) DemoappParameters {
 		a4 = parseBandwidth(a[3])
 		// allow a deviation of up to one packet per 1 second interval, since we do not send half-packets
 		if a2*a3*8/a1 > a4+a2*a1 || a2*a3*8/a1 < a4-a2*a1 {
-			Check(fmt.Errorf("computed target bandwidth does not match parameters, "+
+			Check(fmt.Errorf("Computed target bandwidth does not match parameters, "+
 				"use wildcard or specify correct bandwidth, expected %d, provided %d",
 				a2*a3*8/a1, a4), 8)
 		}
@@ -225,7 +223,7 @@ func getDuration(duration string) int64 {
 	}
 	d := time.Second * time.Duration(a1)
 	if d > MaxDuration {
-		Check(fmt.Errorf("duration is exceeding MaxDuration: %d > %d", a1, MaxDuration/time.Second), 9)
+		Check(fmt.Errorf("Duration is exceeding MaxDuration: %d > %d", a1, MaxDuration/time.Second), 9)
 		a1 = DefaultDuration
 	}
 	return a1
@@ -275,10 +273,12 @@ func main() {
 		err   error
 		tzero time.Time // initialized to "zero" time
 
-		receiveDone    sync.Mutex // used to signal when the HandleDCConnReceive goroutine has completed
-		iterationsNr   uint
-		overallResults []DemoappResult
-		clientISDAS    string
+		receiveDone sync.Mutex // used to signal when the HandleDCConnReceive goroutine has completed
+
+		iterationsNr uint
+		//overallResults []DemoappResult
+		clientISDAS      string
+		handlerStopValue int
 	)
 
 	flag.Usage = printUsage
@@ -289,6 +289,7 @@ func main() {
 	flag.StringVar(&pathAlgo, "pathAlgo", "", "Path selection algorithm / metric (\"shortest\", \"mtu\")")
 	flag.UintVar(&iterationsNr, "iter", DefaultIterations, "Number of iterations done of demoapp")
 	flag.StringVar(&clientISDAS, "client", "", "Client ISD and AS")
+	flag.IntVar(&handlerStopValue, "stopVal", DefaultStopValue, "Amount of CW SCMPs received until we furcefully stop the demoapp")
 
 	flag.Parse()
 	flagset := make(map[string]bool)
@@ -300,11 +301,12 @@ func main() {
 		printUsage()
 		os.Exit(0)
 	}
+
 	client, err := addr.IAFromString(clientISDAS)
 	if err != nil {
 		Check(fmt.Errorf("Invalid ISD AS combination given for client"), 25)
 	}
-	overallResults = make([]DemoappResult, iterationsNr*2)
+	//overallResults = make([]DemoappResult, iterationsNr*2)
 	fmt.Println("Number of iterations", iterationsNr)
 
 	if len(serverCCAddrStr) > 0 {
@@ -312,7 +314,7 @@ func main() {
 		Check(err, 10)
 	} else {
 		printUsage()
-		Check(fmt.Errorf("error, server address needs to be specified with -s"), 11)
+		Check(fmt.Errorf("Error, server address needs to be specified with -s"), 11)
 	}
 
 	var path snet.Path
@@ -355,7 +357,7 @@ func main() {
 	ctx, cancelF := context.WithTimeout(context.Background(), timeout)
 	defer cancelF()
 
-	scmpH := NewScmpHandler()
+	scmpH := NewScmpHandler(handlerStopValue)
 	//as, _ := addr.ASFromString("ff00:0:113") //TODO: generalize this
 	network := snet.NewCustomNetworkWithPR(client,
 		&snet.DefaultPacketDispatcherService{
@@ -369,254 +371,214 @@ func main() {
 	}
 	defer helperConn.Close()
 
-	runDoneReceive, runDoneSend := scmpH.GetRunDones()
-	// conn, err := appnet.Listen(clientTestAddr)
-	// if err != nil {
-	// 	log.Debug("failed to create connection", "err", err)
-	// }
+	log.Debug("About to start helper connection")
+	go HandleHelpConnReceive(helperConn)
 
-	log.Debug("About to start test connection")
-	go HandleTestConnReceive(helperConn)
+	// Data channel connection
+	DCConn, err = appnet.DefNetwork().Dial(
+		context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
+	Check(err, 15) //MS: often happens
 
-	for i := 0; i < int(iterationsNr); i++ {
-		scmpH.ResetHandler()
-		fmt.Printf("========================================\n new iteration \n======================================== \n")
-		//TODO: update path
+	// update default packet size to max MTU on the selected path
+	if path != nil {
+		InferedPktSize = int64(path.MTU())
+	} else {
+		// use default packet size when within same AS and pathEntry is not set
+		InferedPktSize = DefaultPktSize
+	}
+	if !flagset["cs"] && flagset["sc"] { // Only one direction set, used same for reverse
+		clientBwpStr = serverBwpStr
+		fmt.Println("Only sc parameter set, using same values for cs")
+	}
+	clientBwp = parseDemoappParameters(clientBwpStr)
+	clientBwp.Port = uint16(clientDCAddr.Port)
+	if !flagset["sc"] && flagset["cs"] { // Only one direction set, used same for reverse
+		serverBwpStr = clientBwpStr
+		fmt.Println("Only cs parameter set, using same values for sc")
+	}
+	serverBwp = parseDemoappParameters(serverBwpStr)
+	serverBwp.Port = uint16(serverDCAddr.Host.Port)
+	fmt.Println("\nTest parameters:")
+	fmt.Println("clientDCAddr -> serverDCAddr", clientDCAddr, "->", serverDCAddr)
+	fmt.Printf("client->server: %d seconds, %d bytes, %d packets\n",
+		int(clientBwp.DemoappDuration/time.Second), clientBwp.PacketSize, clientBwp.NumPackets)
+	fmt.Printf("server->client: %d seconds, %d bytes, %d packets\n",
+		int(serverBwp.DemoappDuration/time.Second), serverBwp.PacketSize, serverBwp.NumPackets)
 
-		// Data channel connection
-		DCConn, err = appnet.DefNetwork().Dial(
-			context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
-		// log.Debug("trying to log error 15 like this", "Conn", DCConn, "err", err)
-		Check(err, 15) //MS: often happens
-		// update default packet size to max MTU on the selected path
-		if path != nil {
-			InferedPktSize = int64(path.MTU())
-		} else {
-			// use default packet size when within same AS and pathEntry is not set
-			InferedPktSize = DefaultPktSize
-		}
-		if !flagset["cs"] && flagset["sc"] { // Only one direction set, used same for reverse
-			clientBwpStr = serverBwpStr
-			fmt.Println("Only sc parameter set, using same values for cs")
-		}
-		clientBwp = parseDemoappParameters(clientBwpStr)
-		clientBwp.Port = uint16(clientDCAddr.Port)
-		if !flagset["sc"] && flagset["cs"] { // Only one direction set, used same for reverse
-			serverBwpStr = clientBwpStr
-			fmt.Println("Only cs parameter set, using same values for sc")
-		}
-		serverBwp = parseDemoappParameters(serverBwpStr)
-		serverBwp.Port = uint16(serverDCAddr.Host.Port)
-		fmt.Println("\nTest parameters:")
-		fmt.Println("clientDCAddr -> serverDCAddr", clientDCAddr, "->", serverDCAddr)
-		fmt.Printf("client->server: %d seconds, %d bytes, %d packets\n",
-			int(clientBwp.DemoappDuration/time.Second), clientBwp.PacketSize, clientBwp.NumPackets)
-		fmt.Printf("server->client: %d seconds, %d bytes, %d packets\n",
-			int(serverBwp.DemoappDuration/time.Second), serverBwp.PacketSize, serverBwp.NumPackets)
+	hopfield, _ := path.Path().GetHopField(path.Path().HopOff)
+	infofield, _ := path.Path().GetInfoField(path.Path().InfOff)
+	fmt.Printf("We got the following path \n InfOff: %v \n HopOff: %v \n \n",
+		infofield, hopfield)
 
-		t := time.Now()
-		expFinishTimeSend := t.Add(serverBwp.DemoappDuration + MaxRTT + GracePeriodSend)
-		expFinishTimeReceive := t.Add(clientBwp.DemoappDuration + MaxRTT + StragglerWaitPeriod)
-		res := DemoappResult{
-			NumPacketsReceived: -1,
-			CorrectlyReceived:  -1,
-			IPAvar:             -1,
-			IPAmin:             -1,
-			IPAavg:             -1,
-			IPAmax:             -1,
-			PrgKey:             clientBwp.PrgKey,
-			ExpectedFinishTime: expFinishTimeReceive,
-		}
-		// res.ResetResults(clientBwp.PrgKey, expFinishTimeReceive)
-		var resLock sync.Mutex
-		if expFinishTimeReceive.Before(expFinishTimeSend) {
-			// The receiver will close the DC connection, so it will wait long enough until the
-			// sender is also done
-			res.ExpectedFinishTime = expFinishTimeSend
-		}
-		receiveDone.Lock()
-		go HandleDCConnReceiveClient(&serverBwp, DCConn, &res, &resLock, &receiveDone, runDoneReceive)
-		pktbuf := make([]byte, 2000)
-		pktbuf[0] = 'N' // Request for new demoapp
-		n := EncodeDemoappParameters(&clientBwp, pktbuf[1:])
-		l := n + 1
-		n = EncodeDemoappParameters(&serverBwp, pktbuf[l:])
-		l = l + n
+	t := time.Now()
+	expFinishTimeSend := t.Add(serverBwp.DemoappDuration + MaxRTT + GracePeriodSend)
+	expFinishTimeReceive := t.Add(clientBwp.DemoappDuration + MaxRTT + StragglerWaitPeriod)
+	res := DemoappResult{
+		NumPacketsReceived: -1,
+		CorrectlyReceived:  -1,
+		IPAvar:             -1,
+		IPAmin:             -1,
+		IPAavg:             -1,
+		IPAmax:             -1,
+		PrgKey:             clientBwp.PrgKey,
+		ExpectedFinishTime: expFinishTimeReceive,
+	}
+	var resLock sync.Mutex
+	if expFinishTimeReceive.Before(expFinishTimeSend) {
+		// The receiver will close the DC connection, so it will wait long enough until the
+		// sender is also done
+		res.ExpectedFinishTime = expFinishTimeSend
+	}
+	receiveDone.Lock()
+	go HandleDCConnReceive(&serverBwp, DCConn, &res, &resLock, &receiveDone)
+	pktbuf := make([]byte, 2000)
+	pktbuf[0] = 'N' // Request for new demoapp
+	n := EncodeDemoappParameters(&clientBwp, pktbuf[1:])
+	l := n + 1
+	n = EncodeDemoappParameters(&serverBwp, pktbuf[l:])
+	l = l + n
 
-		var numtries int64 = 0
-		for numtries < MaxTries {
-			_, err = CCConn.Write(pktbuf[:l])
-			Check(err, 16)
+	var numtries int64 = 0
+	for numtries < MaxTries {
+		_, err = CCConn.Write(pktbuf[:l])
+		Check(err, 16)
 
-			err = CCConn.SetReadDeadline(time.Now().Add(MaxRTT))
-			Check(err, 17)
-			n, err = CCConn.Read(pktbuf)
-			if err != nil {
-				// A timeout likely happened, see if we should adjust the expected finishing time
-				expFinishTimeReceive = time.Now().Add(clientBwp.DemoappDuration + MaxRTT + StragglerWaitPeriod)
-				resLock.Lock()
-				if res.ExpectedFinishTime.Before(expFinishTimeReceive) {
-					res.ExpectedFinishTime = expFinishTimeReceive
-				}
-				resLock.Unlock()
-
-				numtries++
-				continue
+		err = CCConn.SetReadDeadline(time.Now().Add(MaxRTT))
+		Check(err, 17)
+		n, err = CCConn.Read(pktbuf)
+		if err != nil {
+			// A timeout likely happened, see if we should adjust the expected finishing time
+			expFinishTimeReceive = time.Now().Add(clientBwp.DemoappDuration + MaxRTT + StragglerWaitPeriod)
+			resLock.Lock()
+			if res.ExpectedFinishTime.Before(expFinishTimeReceive) {
+				res.ExpectedFinishTime = expFinishTimeReceive
 			}
-			// Remove read deadline
-			err = CCConn.SetReadDeadline(tzero)
-			Check(err, 18)
+			resLock.Unlock()
 
-			if n != 2 {
-				fmt.Println("Incorrect server response, trying again")
-				time.Sleep(Timeout)
-				numtries++
-				continue
-			}
-			if pktbuf[0] != 'N' {
-				fmt.Println("Incorrect server response, trying again")
-				time.Sleep(Timeout)
-				numtries++
-				continue
-			}
-			if pktbuf[1] != 0 {
-				// The server asks us to wait for some amount of time
-				time.Sleep(time.Second * time.Duration(int(pktbuf[1])))
-				// Don't increase numtries in this case
-				continue
-			}
+			numtries++
+			continue
+		}
+		// Remove read deadline
+		err = CCConn.SetReadDeadline(tzero)
+		Check(err, 18)
 
-			// Everything was successful, exit the loop
-			break
+		if n != 2 {
+			fmt.Println("Incorrect server response, trying again")
+			time.Sleep(Timeout)
+			numtries++
+			continue
+		}
+		if pktbuf[0] != 'N' {
+			fmt.Println("Incorrect server response, trying again")
+			time.Sleep(Timeout)
+			numtries++
+			continue
+		}
+		if pktbuf[1] != 0 {
+			// The server asks us to wait for some amount of time
+			time.Sleep(time.Second * time.Duration(int(pktbuf[1])))
+			// Don't increase numtries in this case
+			continue
 		}
 
-		if numtries == MaxTries {
-			Check(fmt.Errorf("error, could not receive a server response, MaxTries attempted without success."), 19)
+		// Everything was successful, exit the loop
+		break
+	}
+
+	if numtries == MaxTries {
+		Check(fmt.Errorf("Error, could not receive a server response, MaxTries attempted without success."), 19)
+	}
+
+	go HandleDCConnSend(&clientBwp, DCConn)
+
+	receiveDone.Lock()
+
+	fmt.Println("\nS->C results")
+	att := 8 * serverBwp.PacketSize * serverBwp.NumPackets / int64(serverBwp.DemoappDuration/time.Second)
+	ach := 8 * serverBwp.PacketSize * res.CorrectlyReceived / int64(serverBwp.DemoappDuration/time.Second)
+	fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
+	fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
+	fmt.Println("Loss rate:", (serverBwp.NumPackets-res.CorrectlyReceived)*100/serverBwp.NumPackets, "%")
+	fmt.Printf("Number of packets received %d\n", res.CorrectlyReceived)
+	variance := res.IPAvar
+	average := res.IPAavg
+	fmt.Printf("Interarrival time variance: %dms, average interarrival time: %dms\n",
+		variance/1e6, average/1e6)
+	fmt.Printf("Interarrival time min: %dms, interarrival time max: %dms\n",
+		res.IPAmin/1e6, res.IPAmax/1e6)
+
+	// Fetch results from server
+	numtries = 0
+	for numtries < MaxTries {
+		pktbuf[0] = 'R'
+		copy(pktbuf[1:], clientBwp.PrgKey)
+		_, err = CCConn.Write(pktbuf[:1+len(clientBwp.PrgKey)])
+		Check(err, 20)
+
+		err = CCConn.SetReadDeadline(time.Now().Add(MaxRTT))
+		Check(err, 21)
+		n, err = CCConn.Read(pktbuf)
+		if err != nil {
+			numtries++
+			continue
+		}
+		// Remove read deadline
+		err = CCConn.SetReadDeadline(tzero)
+		Check(err, 22)
+
+		if n < 2 {
+			numtries++
+			continue
+		}
+		if pktbuf[0] != 'R' {
+			numtries++
+			continue
+		}
+		if pktbuf[1] != byte(0) {
+			// Error case
+			if pktbuf[1] == byte(127) {
+				Check(fmt.Errorf("Results could not be found or PRG key was incorrect, abort"), 23)
+			}
+			// pktbuf[1] contains number of seconds to wait for results
+			fmt.Println("We need to sleep for", pktbuf[1], "seconds before we can get the results")
+			time.Sleep(time.Duration(pktbuf[1]) * time.Second)
+			// We don't increment numtries as this was not a lost packet or other communication error
+			continue
 		}
 
-		go HandleDCConnSendClient(&clientBwp, DCConn, runDoneSend, scmpH)
-
-		receiveDone.Lock()
-		receiveDone.Unlock()
-		if res.EnforcedEnd {
-			actualDuration = res.EnforcedFinishTime.Sub(res.StartingTime)
-			interPktInterval = serverBwp.DemoappDuration / time.Duration(serverBwp.NumPackets-1)
-			expectedPktReceived = int64(actualDuration / interPktInterval)
+		sres, n1, err := DecodeDemoappResult(pktbuf[2:])
+		if err != nil {
+			fmt.Println("Decoding error, try again")
+			numtries++
+			continue
 		}
-		fmt.Println("\nS->C results")
-		att := 8 * serverBwp.PacketSize * serverBwp.NumPackets / int64(serverBwp.DemoappDuration/time.Second)
-		ach := 8 * serverBwp.PacketSize * res.CorrectlyReceived / int64(serverBwp.DemoappDuration/time.Second)
+		if n1+2 < n {
+			fmt.Println("Insufficient number of bytes received, try again")
+			time.Sleep(Timeout)
+			numtries++
+			continue
+		}
+		if !bytes.Equal(clientBwp.PrgKey, sres.PrgKey) {
+			fmt.Println("PRG Key returned from server incorrect, this should never happen")
+			numtries++
+			continue
+		}
+		fmt.Println("\nC->S results")
+		att = 8 * clientBwp.PacketSize * clientBwp.NumPackets / int64(clientBwp.DemoappDuration/time.Second)
+		ach = 8 * clientBwp.PacketSize * sres.CorrectlyReceived / int64(clientBwp.DemoappDuration/time.Second)
 		fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
 		fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
-		if res.EnforcedEnd {
-			enforcedExpected := 8 * serverBwp.PacketSize * expectedPktReceived / int64(actualDuration/time.Second)
-			enforcedActual := 8 * serverBwp.PacketSize * res.CorrectlyReceived / int64(actualDuration/time.Second)
-			fmt.Printf("Enforced duration: %d\n", actualDuration/1000000000)
-			fmt.Printf("Expected BW enforced: %d bps / %.2f Mbps\n", enforcedExpected, float64(att)/1000000)
-			fmt.Printf("Actual BW enforced: %d bps / %.2f Mbps\n", enforcedActual, float64(ach)/1000000)
-		}
-		overallResults[i*2] = res
-
-		fmt.Println("Loss rate:", (serverBwp.NumPackets-res.CorrectlyReceived)*100/serverBwp.NumPackets, "%")
-		fmt.Printf("Number of packets received %d\n", res.CorrectlyReceived)
-		variance := res.IPAvar
-		average := res.IPAavg
+		fmt.Printf("Number of packets received: %v\n", sres.NumPacketsReceived)
+		fmt.Println("Loss rate:", (clientBwp.NumPackets-sres.CorrectlyReceived)*100/clientBwp.NumPackets, "%")
+		fmt.Printf("Number of packets received %d\n", sres.CorrectlyReceived)
+		variance := sres.IPAvar
+		average := sres.IPAavg
 		fmt.Printf("Interarrival time variance: %dms, average interarrival time: %dms\n",
 			variance/1e6, average/1e6)
 		fmt.Printf("Interarrival time min: %dms, interarrival time max: %dms\n",
-			res.IPAmin/1e6, res.IPAmax/1e6)
-
-		// Fetch results from server
-		numtries = 0
-		for numtries < MaxTries {
-			log.Debug("trying to get result", "try number", numtries, "time", time.Now().Format("2006-01-02 15:04:05.000000"))
-			pktbuf[0] = 'R'
-			copy(pktbuf[1:], clientBwp.PrgKey)
-			_, err = CCConn.Write(pktbuf[:1+len(clientBwp.PrgKey)])
-			Check(err, 20)
-
-			err = CCConn.SetReadDeadline(time.Now().Add(MaxRTT))
-			Check(err, 21)
-			n, err = CCConn.Read(pktbuf)
-			if err != nil {
-				numtries++
-				continue
-			}
-			// Remove read deadline
-			err = CCConn.SetReadDeadline(tzero)
-			Check(err, 22)
-
-			if n < 2 {
-				numtries++
-				continue
-			}
-			if pktbuf[0] != 'R' {
-				numtries++
-				continue
-			}
-			if pktbuf[1] != byte(0) {
-				// Error case
-				if pktbuf[1] == byte(127) {
-					Check(fmt.Errorf("results could not be found or PRG key was incorrect, abort"), 23)
-				}
-				// pktbuf[1] contains number of seconds to wait for results
-				fmt.Println("We need to sleep for", pktbuf[1], "seconds before we can get the results")
-				time.Sleep(time.Duration(pktbuf[1]) * time.Second)
-				// We don't increment numtries as this was not a lost packet or other communication error
-				continue
-			}
-
-			sres, n1, err := DecodeDemoappResult(pktbuf[2:])
-			if err != nil {
-				fmt.Println("Decoding error, try again")
-				numtries++
-				continue
-			}
-			if n1+2 < n {
-				fmt.Println("Insufficient number of bytes received, try again")
-				time.Sleep(Timeout)
-				numtries++
-				continue
-			}
-			if !bytes.Equal(clientBwp.PrgKey, sres.PrgKey) {
-				fmt.Println("PRG Key returned from server incorrect, this should never happen")
-				numtries++
-				continue
-			}
-			fmt.Println("\nC->S results")
-			att = 8 * clientBwp.PacketSize * clientBwp.NumPackets / int64(clientBwp.DemoappDuration/time.Second)
-			ach = 8 * clientBwp.PacketSize * sres.CorrectlyReceived / int64(clientBwp.DemoappDuration/time.Second)
-			fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
-			fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
-			fmt.Printf("Number of packets received: %v\n", sres.NumPacketsReceived)
-			fmt.Println("Loss rate:", (clientBwp.NumPackets-sres.CorrectlyReceived)*100/clientBwp.NumPackets, "%")
-			fmt.Printf("Number of packets received %d\n", sres.CorrectlyReceived)
-			variance := sres.IPAvar
-			average := sres.IPAavg
-			fmt.Printf("Interarrival time variance: %dms, average interarrival time: %dms\n",
-				variance/1e6, average/1e6)
-			fmt.Printf("Interarrival time min: %dms, interarrival time max: %dms\n\n",
-				sres.IPAmin/1e6, sres.IPAmax/1e6)
-			//return
-			log.Debug("try to lock receiveDone")
-			receiveDone.Lock()
-			log.Debug("try to unlock receiveDone")
-			receiveDone.Unlock()
-			log.Debug("iteration completed")
-			overallResults[i*2+1] = *sres
-			time.Sleep(MaxRTT)
-			DCConn.Close()
-
-			break
-		}
-		if numtries >= MaxTries {
-			fmt.Println("Error, could not fetch server results, MaxTries attempted without success.")
-			overallResults[i*2+1] = DemoappResult{}
-
-		}
-		time.Sleep(MaxRTT)
-		DCConn.Close()
-
+			sres.IPAmin/1e6, sres.IPAmax/1e6)
+		return
 	}
-	fmt.Printf("\n\n================================================================ \nCompleted one run of Demoapp\n================================================================\n\n")
+
+	fmt.Println("Error, could not fetch server results, MaxTries attempted without success.")
 }
