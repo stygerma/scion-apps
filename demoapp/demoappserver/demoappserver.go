@@ -42,6 +42,8 @@ var (
 	enderCompleted bool
 	boolEndRec     *bool
 	boolEndSnd     *bool
+	firstRun       bool
+	receiveDone    sync.Mutex
 )
 
 // Deletes the old entries in resultsMap
@@ -84,7 +86,7 @@ func main() {
 	// 	log.LvlFilterHandler(log.LvlDebug,
 	// 		log.Must.FileHandler(fmt.Sprintf("%s/%s.log", *logDir, *id),
 	// 			fmt15.Fmt15Format(nil)))))
-
+	firstRun = true
 	err := runServer(uint16(*serverPort))
 	if err != nil {
 		LogFatal("Unable to start server", "err", err)
@@ -107,6 +109,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 
 	for {
 		// Handle client requests
+
 		n, fromAddr, err := CCConn.ReadFrom(receivePacketBuffer)
 		clientCCAddr := fromAddr.(*snet.UDPAddr)
 		if err != nil {
@@ -126,7 +129,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				// This can only happen if client aborted and never picked up results
 				// then information got removed by purgeOldResults goroutine
 				currentdemoapp = ""
-			} else if t.After(v.ExpectedFinishTime) {
+			} else if t.After(v.ExpectedFinishTime) || t.After(v.EnforcedFinishTime) {
 				// The demoapp should be finished by now, check if results are written
 				if v.NumPacketsReceived >= 0 {
 					// Indeed, the demoapp has completed
@@ -139,6 +142,22 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 
 		if receivePacketBuffer[0] == 'N' {
 			fmt.Println("\n\nNew demoapp request")
+			//forcefully quit the last demoapp iteration and disregard results
+			if !firstRun {
+				if !enderCompleted {
+					close(enderReceive)
+					close(enderSend)
+					// *boolEndRec = true
+					// *boolEndSnd = true
+					enderCompleted = true
+					fmt.Println("Ender signal because of new demoapp request:", time.Now().Format("2006-01-02 15:04:05.000000"))
+				}
+				receiveDone.Lock()
+				receiveDone.Unlock()
+				currentdemoapp = ""
+
+			}
+			firstRun = false
 			if len(currentdemoapp) != 0 {
 				fmt.Println("A demoapp is already ongoing", clientCCAddrStr)
 				if clientCCAddrStr == currentdemoapp {
@@ -213,6 +232,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				sendPacketBuffer[1] = byte(1)
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:2], clientCCAddr)
 				// Ignore error
+				fmt.Println("Unable to open data connection")
 				continue
 			}
 
@@ -239,9 +259,10 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			resultsMap[clientCCAddrStr] = &bres
 			resultsMapLock.Unlock()
 
+			receiveDone.Lock()
 			// go HandleDCConnReceive(clientBwp, DCConn, resChan)
-			enderReceive = HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, nil) //, &enderReceive
-			enderSend = HandleDCConnSendServer(serverBwp, DCConn)                                    //, &enderSend
+			enderReceive = HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, &receiveDone) //, &enderReceive
+			enderSend = HandleDCConnSendServer(serverBwp, DCConn)                                             //, &enderSend
 
 			// boolEndRec = HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, nil)
 			// boolEndSnd = HandleDCConnSendServer(serverBwp, DCConn)

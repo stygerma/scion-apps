@@ -368,15 +368,15 @@ func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn,
 		// initialization and in the code above, but it's good practice to do always lock when using the variable
 		// eft := res.ExpectedFinishTime
 		resLock.Unlock()
-		if done != nil {
-			// Signal that we're done
-			done.Unlock()
-		}
 		// if time.Now().Before(eft) {
 		// 	time.Sleep(time.Until(eft))
 		// }
 		time.Sleep(time.Second / 2)
 		_ = udpConnection.Close()
+		if done != nil {
+			// Signal that we're done
+			done.Unlock()
+		}
 	}()
 	fmt.Println("Ender returned ")
 	return ender
