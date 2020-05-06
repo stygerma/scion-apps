@@ -24,12 +24,8 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"time"
-
-	log "github.com/inconshreveable/log15"
-	"github.com/kormat/fmt15"
 
 	. "github.com/netsec-ethz/scion-apps/demoapp/demoapplib"
 	"github.com/netsec-ethz/scion-apps/pkg/appnet"
@@ -41,6 +37,10 @@ var (
 	resultsMap     map[string]*DemoappResult
 	resultsMapLock sync.Mutex
 	currentDemoapp string // Contains connection parameters, in case server's ack packet was lost
+	DCConn         *snet.Conn
+	enderSend      chan struct{}
+	enderReceive   chan struct{}
+	endedAlready   bool
 )
 
 // Deletes the old entries in resultsMap
@@ -65,24 +65,24 @@ func main() {
 
 	// Fetch arguments from command line
 	serverPort := flag.Uint("p", 40002, "Port")
-	id := flag.String("id", "demoapp", "Element ID")
-	logDir := flag.String("log_dir", "./logs", "Log directory")
+	// id := flag.String("id", "demoapp", "Element ID")
+	// logDir := flag.String("log_dir", "./logs", "Log directory")
 
 	flag.Parse()
 
 	// Setup logging
-	if _, err := os.Stat(*logDir); os.IsNotExist(err) {
-		err := os.Mkdir(*logDir, 0744)
-		if err != nil {
-			LogFatal("Unable to create log dir", "err", err)
-		}
-	}
-	log.Root().SetHandler(log.MultiHandler(
-		log.LvlFilterHandler(log.LvlDebug,
-			log.StreamHandler(os.Stderr, fmt15.Fmt15Format(fmt15.ColorMap))),
-		log.LvlFilterHandler(log.LvlDebug,
-			log.Must.FileHandler(fmt.Sprintf("%s/%s.log", *logDir, *id),
-				fmt15.Fmt15Format(nil)))))
+	// if _, err := os.Stat(*logDir); os.IsNotExist(err) {
+	// 	err := os.Mkdir(*logDir, 0744)
+	// 	if err != nil {
+	// 		LogFatal("Unable to create log dir", "err", err)
+	// 	}
+	// }
+	// log.Root().SetHandler(log.MultiHandler(
+	// 	log.LvlFilterHandler(log.LvlDebug,
+	// 		log.StreamHandler(os.Stderr, fmt15.Fmt15Format(fmt15.ColorMap))),
+	// 	log.LvlFilterHandler(log.LvlDebug,
+	// 		log.Must.FileHandler(fmt.Sprintf("%s/%s.log", *logDir, *id),
+	// 			fmt15.Fmt15Format(nil)))))
 
 	err := runServer(uint16(*serverPort))
 	if err != nil {
@@ -133,10 +133,14 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			}
 		}
 		clientCCAddrStr := clientCCAddr.String()
-		fmt.Println("Received request:", clientCCAddrStr)
+		fmt.Println("Received request:", clientCCAddrStr, "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 
 		if receivePacketBuffer[0] == 'N' {
 			// New demoapp request
+			fmt.Println("\n\nNew demoapp request")
+
+			//TODO: for the second and further iteration kill iteration from before
+			// or check if everything is written; we don't want to enter this if clause
 			if len(currentDemoapp) != 0 {
 				fmt.Println("A demoapp is already ongoing", clientCCAddrStr)
 				if clientCCAddrStr == currentDemoapp {
@@ -171,6 +175,8 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				continue
 			}
 
+			endedAlready = false
+
 			// This is a new request
 			clientBwp, n1, err := DecodeDemoappParameters(receivePacketBuffer[1:])
 			if err != nil {
@@ -199,7 +205,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			serverDCAddr := &net.UDPAddr{IP: serverCCAddr.IP, Port: int(serverBwp.Port)}
 
 			// Open Data Connection
-			DCConn, err := appnet.DefNetwork().Dial(
+			DCConn, err = appnet.DefNetwork().Dial(
 				context.TODO(), "udp", serverDCAddr, clientDCAddr, addr.SvcNone)
 			if err != nil {
 				// An error happened, ask the client to try again in 1 second
@@ -234,8 +240,8 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			resultsMapLock.Unlock()
 
 			// go HandleDCConnReceive(clientBwp, DCConn, resChan)
-			go HandleDCConnReceive(clientBwp, DCConn, &bres, &resultsMapLock, nil)
-			go HandleDCConnSend(serverBwp, DCConn)
+			enderReceive = HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, nil)
+			enderSend = HandleDCConnSendServer(serverBwp, DCConn)
 
 			// Send back success
 			sendPacketBuffer[0] = 'N'
@@ -246,6 +252,8 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			currentDemoapp = clientCCAddrStr
 		} else if receivePacketBuffer[0] == 'R' {
 			// This is a request for the results
+			fmt.Println("New results request:", time.Now().Format("2006-01-02 15:04:05.000000"))
+
 			sendPacketBuffer[0] = 'R'
 			// Make sure that the client is known and that the results are ready
 			v, ok := resultsMap[clientCCAddrStr]
@@ -262,6 +270,17 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:2], clientCCAddr)
 				continue
 			}
+
+			//Stop reading in receiver, avoids blocking from readfunction
+			if !endedAlready {
+				enforcedFinish := time.Now()
+				_ = DCConn.SetReadDeadline(enforcedFinish)
+
+				close(enderReceive)
+				close(enderSend)
+				endedAlready = true
+			}
+
 			// Note: it would be better to have the resultsMap key consist only of the PRG key,
 			// so that a repeated demoapp from the same client with the same port gets a
 			// different resultsMap entry. However, in practice, a client would not run concurrent
@@ -274,7 +293,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 					// structure, so let's let client wait for 1 second
 					sendPacketBuffer[1] = byte(1)
 				} else {
-					sendPacketBuffer[1] = byte(v.ExpectedFinishTime.Sub(t)/time.Second) + 1
+					sendPacketBuffer[1] = byte(1)
 				}
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:n], clientCCAddr)
 				continue

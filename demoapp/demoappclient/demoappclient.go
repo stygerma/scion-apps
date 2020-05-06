@@ -302,6 +302,8 @@ func main() {
 		os.Exit(0)
 	}
 
+	fmt.Println("\n===================================================\n new Demoapp\n=================================================== ")
+
 	client, err := addr.IAFromString(clientISDAS)
 	if err != nil {
 		Check(fmt.Errorf("Invalid ISD AS combination given for client"), 25)
@@ -374,6 +376,10 @@ func main() {
 	log.Debug("About to start helper connection")
 	go HandleHelpConnReceive(helperConn)
 
+	enderReceive, EnderSend := scmpH.GetEnders()
+
+	//TODO: add loop: reset handler there
+
 	// Data channel connection
 	DCConn, err = appnet.DefNetwork().Dial(
 		context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
@@ -405,11 +411,6 @@ func main() {
 	fmt.Printf("server->client: %d seconds, %d bytes, %d packets\n",
 		int(serverBwp.DemoappDuration/time.Second), serverBwp.PacketSize, serverBwp.NumPackets)
 
-	hopfield, _ := path.Path().GetHopField(path.Path().HopOff)
-	infofield, _ := path.Path().GetInfoField(path.Path().InfOff)
-	fmt.Printf("We got the following path \n InfOff: %v \n HopOff: %v \n \n",
-		infofield, hopfield)
-
 	t := time.Now()
 	expFinishTimeSend := t.Add(serverBwp.DemoappDuration + MaxRTT + GracePeriodSend)
 	expFinishTimeReceive := t.Add(clientBwp.DemoappDuration + MaxRTT + StragglerWaitPeriod)
@@ -430,7 +431,7 @@ func main() {
 		res.ExpectedFinishTime = expFinishTimeSend
 	}
 	receiveDone.Lock()
-	go HandleDCConnReceive(&serverBwp, DCConn, &res, &resLock, &receiveDone)
+	go HandleDCConnReceiveClient(&serverBwp, DCConn, &res, &resLock, &receiveDone, enderReceive)
 	pktbuf := make([]byte, 2000)
 	pktbuf[0] = 'N' // Request for new demoapp
 	n := EncodeDemoappParameters(&clientBwp, pktbuf[1:])
@@ -489,7 +490,7 @@ func main() {
 		Check(fmt.Errorf("Error, could not receive a server response, MaxTries attempted without success."), 19)
 	}
 
-	go HandleDCConnSend(&clientBwp, DCConn)
+	go HandleDCConnSendClient(&clientBwp, DCConn, EnderSend)
 
 	receiveDone.Lock()
 
@@ -510,6 +511,8 @@ func main() {
 	// Fetch results from server
 	numtries = 0
 	for numtries < MaxTries {
+		log.Debug("trying to get result", "try number", numtries, "time", time.Now().Format("2006-01-02 15:04:05.000000"))
+
 		pktbuf[0] = 'R'
 		copy(pktbuf[1:], clientBwp.PrgKey)
 		_, err = CCConn.Write(pktbuf[:1+len(clientBwp.PrgKey)])
