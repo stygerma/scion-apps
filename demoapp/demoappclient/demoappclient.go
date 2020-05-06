@@ -48,10 +48,15 @@ const (
 	DefaultPktCount          = 30
 	DefaultBW                = 3000
 	WildcardChar             = "?"
+	DefaultIterations        = 5
+	MaxRTT                   = time.Millisecond * 1000
 )
 
 var (
-	InferedPktSize int64
+	InferedPktSize      int64
+	expectedPktReceived int64
+	actualDuration      time.Duration
+	interPktInterval    time.Duration
 )
 
 func prepareAESKey() []byte {
@@ -270,7 +275,10 @@ func main() {
 		err   error
 		tzero time.Time // initialized to "zero" time
 
-		receiveDone sync.Mutex // used to signal when the HandleDCConnReceive goroutine has completed
+		receiveDone    sync.Mutex // used to signal when the HandleDCConnReceive goroutine has completed
+		iterationsNr   uint
+		overallResults []DemoappResult
+		clientISDAS    string
 	)
 
 	flag.Usage = printUsage
@@ -279,6 +287,8 @@ func main() {
 	flag.StringVar(&clientBwpStr, "cs", DefaultDemoappParameters, "Client->Server test parameter")
 	flag.BoolVar(&interactive, "i", false, "Interactive path selection, prompt to choose path")
 	flag.StringVar(&pathAlgo, "pathAlgo", "", "Path selection algorithm / metric (\"shortest\", \"mtu\")")
+	flag.UintVar(&iterationsNr, "iter", DefaultIterations, "Number of iterations done of demoapp")
+	flag.StringVar(&clientISDAS, "client", "", "Client ISD and AS")
 
 	flag.Parse()
 	flagset := make(map[string]bool)
@@ -290,6 +300,12 @@ func main() {
 		printUsage()
 		os.Exit(0)
 	}
+	client, err := addr.IAFromString(clientISDAS)
+	if err != nil {
+		Check(fmt.Errorf("Invalid ISD AS combination given for client"), 25)
+	}
+	overallResults = make([]DemoappResult, iterationsNr*2)
+	fmt.Println("Number of iterations", iterationsNr)
 
 	if len(serverCCAddrStr) > 0 {
 		serverCCAddr, err = appnet.ResolveUDPAddr(serverCCAddrStr)
@@ -340,18 +356,18 @@ func main() {
 	defer cancelF()
 
 	scmpH := NewScmpHandler()
-	as, _ := addr.ASFromString("ff00:0:113") //TODO: generalize this
-	network := snet.NewCustomNetworkWithPR(addr.IA{I: 1, A: as},
+	//as, _ := addr.ASFromString("ff00:0:113") //TODO: generalize this
+	network := snet.NewCustomNetworkWithPR(client,
 		&snet.DefaultPacketDispatcherService{
 			Dispatcher:  reliable.NewDispatcher(""),
 			SCMPHandler: scmpH,
 		},
 	)
-	snetConn, err := network.Listen(ctx, "udp", clientTestAddr, addr.SvcNone)
+	helperConn, err := network.Listen(ctx, "udp", clientTestAddr, addr.SvcNone)
 	if err != nil {
 		log.Debug("listening failed", "err", err)
 	}
-	defer snetConn.Close()
+	defer helperConn.Close()
 
 	runDoneReceive, runDoneSend := scmpH.GetRunDones()
 	// conn, err := appnet.Listen(clientTestAddr)
@@ -360,10 +376,11 @@ func main() {
 	// }
 
 	log.Debug("About to start test connection")
-	go HandleTestConnReceive(snetConn)
+	go HandleTestConnReceive(helperConn)
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < int(iterationsNr); i++ {
 		scmpH.ResetHandler()
+		fmt.Printf("========================================\n new iteration \n======================================== \n")
 		//TODO: update path
 
 		// Data channel connection
@@ -410,8 +427,7 @@ func main() {
 			PrgKey:             clientBwp.PrgKey,
 			ExpectedFinishTime: expFinishTimeReceive,
 		}
-		//res := DemoappResult{}
-		res.ResetResults(clientBwp.PrgKey, expFinishTimeReceive)
+		// res.ResetResults(clientBwp.PrgKey, expFinishTimeReceive)
 		var resLock sync.Mutex
 		if expFinishTimeReceive.Before(expFinishTimeSend) {
 			// The receiver will close the DC connection, so it will wait long enough until the
@@ -482,11 +498,25 @@ func main() {
 
 		receiveDone.Lock()
 		receiveDone.Unlock()
+		if res.EnforcedEnd {
+			actualDuration = res.EnforcedFinishTime.Sub(res.StartingTime)
+			interPktInterval = serverBwp.DemoappDuration / time.Duration(serverBwp.NumPackets-1)
+			expectedPktReceived = int64(actualDuration / interPktInterval)
+		}
 		fmt.Println("\nS->C results")
 		att := 8 * serverBwp.PacketSize * serverBwp.NumPackets / int64(serverBwp.DemoappDuration/time.Second)
 		ach := 8 * serverBwp.PacketSize * res.CorrectlyReceived / int64(serverBwp.DemoappDuration/time.Second)
 		fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
 		fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
+		if res.EnforcedEnd {
+			enforcedExpected := 8 * serverBwp.PacketSize * expectedPktReceived / int64(actualDuration/time.Second)
+			enforcedActual := 8 * serverBwp.PacketSize * res.CorrectlyReceived / int64(actualDuration/time.Second)
+			fmt.Printf("Enforced duration: %d\n", actualDuration/1000000000)
+			fmt.Printf("Expected BW enforced: %d bps / %.2f Mbps\n", enforcedExpected, float64(att)/1000000)
+			fmt.Printf("Actual BW enforced: %d bps / %.2f Mbps\n", enforcedActual, float64(ach)/1000000)
+		}
+		overallResults[i*2] = res
+
 		fmt.Println("Loss rate:", (serverBwp.NumPackets-res.CorrectlyReceived)*100/serverBwp.NumPackets, "%")
 		fmt.Printf("Number of packets received %d\n", res.CorrectlyReceived)
 		variance := res.IPAvar
@@ -499,7 +529,7 @@ func main() {
 		// Fetch results from server
 		numtries = 0
 		for numtries < MaxTries {
-			log.Debug("trying to get result", "try number", numtries)
+			log.Debug("trying to get result", "try number", numtries, "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 			pktbuf[0] = 'R'
 			copy(pktbuf[1:], clientBwp.PrgKey)
 			_, err = CCConn.Write(pktbuf[:1+len(clientBwp.PrgKey)])
@@ -573,15 +603,20 @@ func main() {
 			log.Debug("try to unlock receiveDone")
 			receiveDone.Unlock()
 			log.Debug("iteration completed")
+			overallResults[i*2+1] = *sres
+			time.Sleep(MaxRTT)
 			DCConn.Close()
-			time.Sleep(time.Second)
+
 			break
 		}
 		if numtries >= MaxTries {
 			fmt.Println("Error, could not fetch server results, MaxTries attempted without success.")
+			overallResults[i*2+1] = DemoappResult{}
+
 		}
+		time.Sleep(MaxRTT)
 		DCConn.Close()
-		time.Sleep(time.Second)
 
 	}
+	fmt.Printf("\n\n================================================================ \nCompleted one run of Demoapp\n================================================================\n\n")
 }

@@ -24,12 +24,8 @@ import (
 	"flag"
 	"fmt"
 	"net"
-	"os"
 	"sync"
 	"time"
-
-	log "github.com/inconshreveable/log15"
-	"github.com/kormat/fmt15"
 
 	. "github.com/netsec-ethz/scion-apps/demoapp/demoapplib"
 	"github.com/netsec-ethz/scion-apps/pkg/appnet"
@@ -44,8 +40,8 @@ var (
 	enderReceive   chan struct{}
 	enderSend      chan struct{}
 	enderCompleted bool
-	// enderReceive   bool
-	// enderSend      bool
+	boolEndRec     *bool
+	boolEndSnd     *bool
 )
 
 // Deletes the old entries in resultsMap
@@ -70,24 +66,24 @@ func main() {
 
 	// Fetch arguments from command line
 	serverPort := flag.Uint("p", 40002, "Port")
-	id := flag.String("id", "demoapper", "Element ID")
-	logDir := flag.String("log_dir", "./logs", "Log directory")
+	// id := flag.String("id", "demoapper", "Element ID")
+	// logDir := flag.String("log_dir", "./logs", "Log directory")
 
 	flag.Parse()
 
 	// Setup logging
-	if _, err := os.Stat(*logDir); os.IsNotExist(err) {
-		err := os.Mkdir(*logDir, 0744)
-		if err != nil {
-			LogFatal("Unable to create log dir", "err", err)
-		}
-	}
-	log.Root().SetHandler(log.MultiHandler(
-		log.LvlFilterHandler(log.LvlDebug,
-			log.StreamHandler(os.Stderr, fmt15.Fmt15Format(fmt15.ColorMap))),
-		log.LvlFilterHandler(log.LvlDebug,
-			log.Must.FileHandler(fmt.Sprintf("%s/%s.log", *logDir, *id),
-				fmt15.Fmt15Format(nil)))))
+	// if _, err := os.Stat(*logDir); os.IsNotExist(err) {
+	// 	err := os.Mkdir(*logDir, 0744)
+	// 	if err != nil {
+	// 		LogFatal("Unable to create log dir", "err", err)
+	// 	}
+	// }
+	// log.Root().SetHandler(log.MultiHandler(
+	// 	log.LvlFilterHandler(log.LvlDebug,
+	// 		log.StreamHandler(os.Stderr, fmt15.Fmt15Format(fmt15.ColorMap))),
+	// 	log.LvlFilterHandler(log.LvlDebug,
+	// 		log.Must.FileHandler(fmt.Sprintf("%s/%s.log", *logDir, *id),
+	// 			fmt15.Fmt15Format(nil)))))
 
 	err := runServer(uint16(*serverPort))
 	if err != nil {
@@ -115,6 +111,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 		clientCCAddr := fromAddr.(*snet.UDPAddr)
 		if err != nil {
 			// Todo: check error in detail, but for now simply continue
+			fmt.Println("Error when receiving request, err:", err)
 			continue
 		}
 		if n < 1 {
@@ -138,11 +135,10 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			}
 		}
 		clientCCAddrStr := clientCCAddr.String()
-		fmt.Println("Received request:", clientCCAddrStr)
+		fmt.Println("Received request:", clientCCAddrStr, "time:", time.Now().Format("2006-01-02 15:04:05.000000"))
 
 		if receivePacketBuffer[0] == 'N' {
-			fmt.Println("New demoapp request")
-			// New demoapp request
+			fmt.Println("\n\nNew demoapp request")
 			if len(currentdemoapp) != 0 {
 				fmt.Println("A demoapp is already ongoing", clientCCAddrStr)
 				if clientCCAddrStr == currentdemoapp {
@@ -196,8 +192,8 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				continue
 			}
 			//ensure that channels are empty
-			enderReceive = make(chan struct{})
-			enderSend = make(chan struct{})
+			// enderReceive = make(chan struct{})
+			// enderSend = make(chan struct{})
 			enderCompleted = false
 
 			// Address of client Data Connection (DC)
@@ -207,14 +203,6 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// Address of server Data Connection (DC)
 			serverCCAddr := CCConn.LocalAddr().(*net.UDPAddr)
 			serverDCAddr := &net.UDPAddr{IP: serverCCAddr.IP, Port: int(serverBwp.Port)}
-
-			// serverTestAddr := &net.UDPAddr{IP: serverCCAddr.IP, Port: int(serverBwp.Port) + 1}
-			// testConn, err := appnet.Listen(serverTestAddr)
-			// if err != nil {
-			// 	log.Debug("failed to create connection", "err", err)
-			// }
-			// log.Debug("About to start test connection")
-			// go HandleTestConnReceive(testConn)
 
 			// Open Data Connection
 			DCConn, err := appnet.DefNetwork().Dial(
@@ -252,9 +240,15 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			resultsMapLock.Unlock()
 
 			// go HandleDCConnReceive(clientBwp, DCConn, resChan)
-			go HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, nil) //, &enderReceive
-			go HandleDCConnSendServer(serverBwp, DCConn)                                 //, &enderSend
+			enderReceive = HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, nil) //, &enderReceive
+			enderSend = HandleDCConnSendServer(serverBwp, DCConn)                                    //, &enderSend
 
+			// boolEndRec = HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, nil)
+			// boolEndSnd = HandleDCConnSendServer(serverBwp, DCConn)
+			// enderReceive <- struct{}{}
+			// <-enderReceive
+			// enderSend <- struct{}{}
+			// <-enderSend
 			// Send back success
 			sendPacketBuffer[0] = 'N'
 			sendPacketBuffer[1] = byte(0)
@@ -263,7 +257,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// Everything succeeded, now set variable that demoapp is ongoing
 			currentdemoapp = clientCCAddrStr
 		} else if receivePacketBuffer[0] == 'R' {
-			fmt.Println("want the resultstime:", time.Now().Format("2006-01-02 15:04:05.000000"))
+			fmt.Println("want the results time:", time.Now().Format("2006-01-02 15:04:05.000000"))
 			// This is a request for the results
 			sendPacketBuffer[0] = 'R'
 			// Make sure that the client is known and that the results are ready
@@ -291,9 +285,12 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			if !enderCompleted {
 				close(enderReceive)
 				close(enderSend)
+				// *boolEndRec = true
+				// *boolEndSnd = true
 				enderCompleted = true
+				fmt.Println("Ender signal sent time:", time.Now().Format("2006-01-02 15:04:05.000000"))
+
 			}
-			fmt.Println("Ender signal sent time:", time.Now().Format("2006-01-02 15:04:05.000000"))
 			// Note: it would be better to have the resultsMap key consist only of the PRG key,
 			// so that a repeated demoapp from the same client with the same port gets a
 			// different resultsMap entry. However, in practice, a client would not run concurrent
@@ -309,7 +306,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				// else {
 				// 	sendPacketBuffer[1] = byte(v.ExpectedFinishTime.Sub(t)/time.Second) + 1
 				// }
-				v.ExpectedFinishTime = time.Now()
+				//v.ExpectedFinishTime = time.Now()
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:n], clientCCAddr)
 				fmt.Println("Results are not ready yet time:", time.Now().Format("2006-01-02 15:04:05.000000"))
 				continue
@@ -317,6 +314,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			sendPacketBuffer[1] = byte(0)
 			n = EncodeDemoappResult(v, sendPacketBuffer[2:])
 			_, _ = CCConn.WriteTo(sendPacketBuffer[:n+2], clientCCAddr)
+			currentdemoapp = ""
 			fmt.Println("Sent the results")
 		}
 	}

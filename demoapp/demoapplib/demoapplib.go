@@ -72,7 +72,15 @@ type DemoappResult struct {
 	// Only requests that contain the correct key can obtain the result
 	PrgKey             []byte
 	ExpectedFinishTime time.Time
+	EnforcedFinishTime time.Time
+	EnforcedEnd        bool
 }
+
+// func (DemoappParameters) String() string {
+// 	return fmt.Sprintf("NumPacketsReceived: %d, CorrectlyReceived: %d, IPAvar: %d, IPAmin: %d,	IPAavg: %d, \nIPAmax: %d,	StartingTime: %d, PrgKey: %v, ExpectedFinishTime: %d, \nEnforcedFinishTime: %d, EnforcedEnd: %t",
+// 		DemoappResult.NumPacketsReceived, CorrectlyReceived, IPAvar, IPAmin, IPAavg, IPAmax,
+// 		StartingTime, PrgKey, ExpectedFinishTime, EnforcedFinishTime, EnforcedEnd)
+// }
 
 func Check(e error, pos int) {
 	if e != nil {
@@ -181,13 +189,11 @@ func HandleDCConnSendClient(bwp *DemoappParameters, udpConnection *snet.Conn, en
 			return
 		default:
 			// Compute how long to wait
-			// fmt.Println("in client server, testing if we will send")
 			t1 := time.Now()
 			if t1.After(finish) {
 				// We've been sending for too long, sending bandwidth must be insufficient. Abort sending.
 				return
 			}
-			// fmt.Println("in client server, we will send ")
 
 			t2 := t0.Add(interPktInterval * time.Duration(i))
 			if t1.Before(t2) {
@@ -204,159 +210,177 @@ func HandleDCConnSendClient(bwp *DemoappParameters, udpConnection *snet.Conn, en
 	}
 }
 
-func HandleDCConnSendServer(bwp *DemoappParameters, udpConnection *snet.Conn) { //, ender *chan struct{}
-	sb := make([]byte, bwp.PacketSize)
-	var i int64 = 0
-	t0 := time.Now()
-	finish := t0.Add(bwp.DemoappDuration + GracePeriodSend)
-	var interPktInterval time.Duration
-	if bwp.NumPackets > 1 {
-		interPktInterval = bwp.DemoappDuration / time.Duration(bwp.NumPackets-1)
-	} else {
-		interPktInterval = bwp.DemoappDuration
-	}
-	for i < bwp.NumPackets {
-		// if ender {
-		// 	return
-		// } else {
-		select {
-		case <-*ender:
-			return
-		default:
-			// Compute how long to wait
-			t1 := time.Now()
-			if t1.After(finish) {
-				// We've been sending for too long, sending bandwidth must be insufficient. Abort sending.
-				return
-			}
-			t2 := t0.Add(interPktInterval * time.Duration(i))
-			if t1.Before(t2) {
-				time.Sleep(t2.Sub(t1))
-			}
-			// Send packet now
-			PrgFill(bwp.PrgKey, int(i*bwp.PacketSize), sb)
-			// Place packet number at the beginning of the packet, overwriting some PRG data
-			binary.LittleEndian.PutUint32(sb, uint32(i*bwp.PacketSize))
-			n, err := udpConnection.Write(sb)
-			Check(err, 4)
-			i++
-			fmt.Println("Sent this many bytes from server: ", n)
+func HandleDCConnSendServer(bwp *DemoappParameters, udpConnection *snet.Conn) chan struct{} { //,*bool
+	ender := make(chan struct{})
+	// boolEnd := false
+	go func() {
+		sb := make([]byte, bwp.PacketSize)
+		var i int64 = 0
+		t0 := time.Now()
+		finish := t0.Add(bwp.DemoappDuration + GracePeriodSend)
+		var interPktInterval time.Duration
+		if bwp.NumPackets > 1 {
+			interPktInterval = bwp.DemoappDuration / time.Duration(bwp.NumPackets-1)
+		} else {
+			interPktInterval = bwp.DemoappDuration
 		}
-	}
+		for i < bwp.NumPackets {
+			// if boolEnd {
+			// 	return
+			// }
+			select {
+			case <-ender:
+				return
+			default:
+				// Compute how long to wait
+				t1 := time.Now()
+				if t1.After(finish) {
+					// We've been sending for too long, sending bandwidth must be insufficient. Abort sending.
+					return
+				}
+				t2 := t0.Add(interPktInterval * time.Duration(i))
+				if t1.Before(t2) {
+					time.Sleep(t2.Sub(t1))
+				}
+				// Send packet now
+				PrgFill(bwp.PrgKey, int(i*bwp.PacketSize), sb)
+				// Place packet number at the beginning of the packet, overwriting some PRG data
+				binary.LittleEndian.PutUint32(sb, uint32(i*bwp.PacketSize))
+				_, err := udpConnection.Write(sb)
+				Check(err, 4)
+				i++
+				//fmt.Println("Sent this many bytes from server: ", n)
+			}
+		}
+	}()
+	fmt.Println("Ender returned")
+	return ender
+	// return &boolEnd
 }
 
-func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn, res *DemoappResult, resLock *sync.Mutex, done *sync.Mutex) { //, ender *chan struct{}
-	resLock.Lock()
-	finish := res.ExpectedFinishTime
-	res.StartingTime = time.Now()
-	resLock.Unlock()
-	var numPacketsReceived, correctlyReceived int64 = 0, 0
-	InterPacketArrivalTime := make(map[int]int64)
-	_ = udpConnection.SetReadDeadline(finish)
-	// Make the receive buffer a bit larger to enable detection of packets that are too large
-	recBuf := make([]byte, bwp.PacketSize+1000)
-	cmpBuf := make([]byte, bwp.PacketSize)
-	var count uint64 //for testing
-	//finished := false
+func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn, res *DemoappResult, resLock *sync.Mutex, done *sync.Mutex) chan struct{} { //*bool
+	ender := make(chan struct{})
+	// boolEnd := false
+	go func() {
+		resLock.Lock()
+		finish := res.ExpectedFinishTime
+		res.StartingTime = time.Now()
+		resLock.Unlock()
+		var numPacketsReceived, correctlyReceived int64 = 0, 0
+		InterPacketArrivalTime := make(map[int]int64)
+		_ = udpConnection.SetReadDeadline(finish)
+		// Make the receive buffer a bit larger to enable detection of packets that are too large
+		recBuf := make([]byte, bwp.PacketSize+1000)
+		cmpBuf := make([]byte, bwp.PacketSize)
+		var count uint64 //for testing
+		//finished := false
 
-	for time.Now().Before(finish) && correctlyReceived < bwp.NumPackets {
-		// if ender {
-		select {
-		case <-*ender:
-			fmt.Println("Ender signal received", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
-			finish = time.Now()
-			log.Debug("ender received value", "enforced time", time.Now().Format("2006-01-02 15:04:05.000000"), "expected time", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"))
-			_ = udpConnection.SetReadDeadline(finish)
+		for time.Now().Before(finish) && correctlyReceived < bwp.NumPackets {
+			// fmt.Println("entering for loop in receive server", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
+			select {
+			case <-ender:
+				// if boolEnd {
+				fmt.Println("Ender signal received", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
+				finish = time.Now()
+				fmt.Println("ender received value", "enforced time", time.Now().Format("2006-01-02 15:04:05.000000"), "expected time", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"))
+				_ = udpConnection.SetReadDeadline(finish)
 
-			if res.ExpectedFinishTime.Before(finish) {
-				resLock.Lock()
-				log.Debug("finish times", "expected", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"), "enforced", finish.Format("2006-01-02 15:04:05.000000"))
-				res.ExpectedFinishTime = finish
-				resLock.Unlock()
-			}
-			//finished = true
-			break
-		// } else {
-		default:
-			n, err := udpConnection.Read(recBuf)
-			//if finished {
-			//log.Debug("reading in receiver", "n", n, "time", time.Now().Format("2006-01-02 15:04:05.000000"), "count", count)
-			count++
-			//}
-			// Ignore errors, todo: detect type of error and quit if it was because of a SetReadDeadline
-			if err != nil {
-				// If the ReadDeadline expired, then we should extend the finish time, which is
-				// extended on the client side if no response is received from the server. On the server
-				// side, however, a short DemoappDuration with several consecutive packet losses would
-				// lead to closing the connection.
-				resLock.Lock()
-				finish = res.ExpectedFinishTime
-				resLock.Unlock()
-				continue
-			}
-			numPacketsReceived++
-			if int64(n) != bwp.PacketSize {
-				// The packet has incorrect size, do not count as a correct packet
-				// fmt.Println("Incorrect size.", n, "bytes instead of", bwp.PacketSize)
-				continue
-			}
-			// Could consider pre-computing all the packets in a separate goroutine
-			// but since computation is usually much higher than bandwidth, this is
-			// not necessary
-			// Todo: create separate verif function which only compares the packet
-			// so that a discrepancy is noticed immediately without generating the
-			// entire packet
-			iv := int64(binary.LittleEndian.Uint32(recBuf))
-			seqNo := int(iv / bwp.PacketSize)
-			InterPacketArrivalTime[seqNo] = time.Now().UnixNano()
-			PrgFill(bwp.PrgKey, int(iv), cmpBuf)
-			binary.LittleEndian.PutUint32(cmpBuf, uint32(iv))
-			if bytes.Equal(recBuf[:bwp.PacketSize], cmpBuf) {
-				if correctlyReceived == 0 {
-					// Adjust finish time after first correctly received packet
-					// Note that we should check that we're not too far away from the beginning of the
-					// demoapp, otherwise we're extending the time for too long. If the server's 'N' response
-					// packet was not dropped, then sending should start within MaxRTT at most.
-					newFinish := time.Now().Add(bwp.DemoappDuration + StragglerWaitPeriod)
-					if newFinish.After(finish) {
-						finish = newFinish
-						_ = udpConnection.SetReadDeadline(finish)
-						resLock.Lock()
-						if res.ExpectedFinishTime.Before(finish) {
-							// Most likely what happened is that the server's 'N' response packet got dropped (in case this
-							// is the receive function on the server side) or the client's request packet got dropped (in
-							// case this is the receive function on the client side). In both cases the ExpectedFinishTime
-							// needs to be updated
-							res.ExpectedFinishTime = finish
-						}
-						resLock.Unlock()
-					}
+				if res.ExpectedFinishTime.Before(finish) {
+					resLock.Lock()
+					fmt.Println("finish times", "expected", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"), "enforced", finish.Format("2006-01-02 15:04:05.000000"))
+					res.EnforcedFinishTime = finish
+					resLock.Unlock()
 				}
-				correctlyReceived++
+				//finished = true
+				break
+				// } else {
+			default:
+				// fmt.Println("About to read in receiver", time.Now().Format("2006-01-02 15:04:05.000000"))
+				n, err := udpConnection.Read(recBuf)
+				//if finished {
+				// fmt.Println("reading in receiver", "n", n, "time", time.Now().Format("2006-01-02 15:04:05.000000"))
+				count++
+				//}
+				// Ignore errors, todo: detect type of error and quit if it was because of a SetReadDeadline
+				if err != nil {
+					// If the ReadDeadline expired, then we should extend the finish time, which is
+					// extended on the client side if no response is received from the server. On the server
+					// side, however, a short DemoappDuration with several consecutive packet losses would
+					// lead to closing the connection.
+					resLock.Lock()
+					finish = res.ExpectedFinishTime
+					resLock.Unlock()
+					continue
+				}
+				numPacketsReceived++
+				if int64(n) != bwp.PacketSize {
+					// The packet has incorrect size, do not count as a correct packet
+					// fmt.Println("Incorrect size.", n, "bytes instead of", bwp.PacketSize)
+					continue
+				}
+				// Could consider pre-computing all the packets in a separate goroutine
+				// but since computation is usually much higher than bandwidth, this is
+				// not necessary
+				// Todo: create separate verif function which only compares the packet
+				// so that a discrepancy is noticed immediately without generating the
+				// entire packet
+				iv := int64(binary.LittleEndian.Uint32(recBuf))
+				seqNo := int(iv / bwp.PacketSize)
+				InterPacketArrivalTime[seqNo] = time.Now().UnixNano()
+				PrgFill(bwp.PrgKey, int(iv), cmpBuf)
+				binary.LittleEndian.PutUint32(cmpBuf, uint32(iv))
+				if bytes.Equal(recBuf[:bwp.PacketSize], cmpBuf) {
+					if correctlyReceived == 0 {
+						// Adjust finish time after first correctly received packet
+						// Note that we should check that we're not too far away from the beginning of the
+						// demoapp, otherwise we're extending the time for too long. If the server's 'N' response
+						// packet was not dropped, then sending should start within MaxRTT at most.
+						newFinish := time.Now().Add(bwp.DemoappDuration + StragglerWaitPeriod)
+						if newFinish.After(finish) {
+							finish = newFinish
+							_ = udpConnection.SetReadDeadline(finish)
+							resLock.Lock()
+							if res.ExpectedFinishTime.Before(finish) {
+								// Most likely what happened is that the server's 'N' response packet got dropped (in case this
+								// is the receive function on the server side) or the client's request packet got dropped (in
+								// case this is the receive function on the client side). In both cases the ExpectedFinishTime
+								// needs to be updated
+								res.ExpectedFinishTime = finish
+							}
+							resLock.Unlock()
+						}
+					}
+					correctlyReceived++
+					// fmt.Println("Still receiving packets", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
+				}
 			}
+
 		}
 
-	}
+		resLock.Lock()
+		fmt.Println("Writing results into corresponding demoappresult time:", time.Now().Format("2006-01-02 15:04:05.000000"))
+		res.NumPacketsReceived = numPacketsReceived
+		res.CorrectlyReceived = correctlyReceived
+		res.IPAvar, res.IPAmin, res.IPAavg, res.IPAmax = aggrInterArrivalTime(InterPacketArrivalTime)
 
-	resLock.Lock()
-	fmt.Println("Writing results into corresponding demoappresult time:", time.Now().Format("2006-01-02 15:04:05.000000"))
-	res.NumPacketsReceived = numPacketsReceived
-	res.CorrectlyReceived = correctlyReceived
-	res.IPAvar, res.IPAmin, res.IPAavg, res.IPAmax = aggrInterArrivalTime(InterPacketArrivalTime)
-
-	// We're done here, let's see if we need to wait for the send function to complete so we can close the connection
-	// Note: the locking here is not strictly necessary, since ExpectedFinishTime is only updated right after
-	// initialization and in the code above, but it's good practice to do always lock when using the variable
-	eft := res.ExpectedFinishTime
-	resLock.Unlock()
-	if done != nil {
-		// Signal that we're done
-		done.Unlock()
-	}
-	if time.Now().Before(eft) {
-		time.Sleep(time.Until(eft))
-	}
-	_ = udpConnection.Close()
+		// We're done here, let's see if we need to wait for the send function to complete so we can close the connection
+		// Note: the locking here is not strictly necessary, since ExpectedFinishTime is only updated right after
+		// initialization and in the code above, but it's good practice to do always lock when using the variable
+		// eft := res.ExpectedFinishTime
+		resLock.Unlock()
+		if done != nil {
+			// Signal that we're done
+			done.Unlock()
+		}
+		// if time.Now().Before(eft) {
+		// 	time.Sleep(time.Until(eft))
+		// }
+		time.Sleep(time.Second / 2)
+		_ = udpConnection.Close()
+	}()
+	fmt.Println("Ender returned ")
+	return ender
+	// return &boolEnd
 }
 
 func HandleDCConnReceiveClient(bwp *DemoappParameters, udpConnection *snet.Conn, res *DemoappResult, resLock *sync.Mutex, done *sync.Mutex, ender chan uint16) {
@@ -370,31 +394,25 @@ func HandleDCConnReceiveClient(bwp *DemoappParameters, udpConnection *snet.Conn,
 	// Make the receive buffer a bit larger to enable detection of packets that are too large
 	recBuf := make([]byte, bwp.PacketSize+1000)
 	cmpBuf := make([]byte, bwp.PacketSize)
-	var count uint64 //for testing
-	//finished := false
 
-Loop:
+	//Loop:
 	for time.Now().Before(finish) && correctlyReceived < bwp.NumPackets {
 		select {
 		case <-ender:
 			finish = time.Now()
 			log.Debug("ender received value", "enforced time", time.Now().Format("2006-01-02 15:04:05.000000"), "expected time", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"))
-			_ = udpConnection.SetReadDeadline(finish)
+			deadline := finish.Add(StragglerWaitPeriod)
+			_ = udpConnection.SetReadDeadline(deadline)
 
-			if res.ExpectedFinishTime.Before(finish) {
-				resLock.Lock()
-				log.Debug("finish times", "expected", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"), "enforced", finish.Format("2006-01-02 15:04:05.000000"))
-				res.ExpectedFinishTime = finish
-				resLock.Unlock()
-			}
+			resLock.Lock()
+			res.EnforcedFinishTime = deadline
+			res.EnforcedEnd = true
+			resLock.Unlock()
 			//finished = true
-			break Loop
+			break //Loop
 		default:
 			n, err := udpConnection.Read(recBuf)
-			//if finished {
-			//log.Debug("reading in receiver", "n", n, "time", time.Now().Format("2006-01-02 15:04:05.000000"), "count", count)
-			count++
-			//}
+
 			// Ignore errors, todo: detect type of error and quit if it was because of a SetReadDeadline
 			if err != nil {
 				// If the ReadDeadline expired, then we should extend the finish time, which is
@@ -510,8 +528,8 @@ func aggrInterArrivalTime(bwr map[int]int64) (IPAvar, IPAmin, IPAavg, IPAmax int
 
 func HandleTestConnReceive(udpConnection *snet.Conn) {
 	now := time.Now()
-	future := now.Add(time.Second * 30)
-	buf := make([]byte, 10000)
+	future := now.Add(time.Second * 60) //TODO: generalize this
+	buf := make([]byte, 10000)          //TODO: do we need to empty this at some point?
 	for time.Now().Before(future) {
 		_, _, _ = udpConnection.ReadFrom(buf) //n, addr, err
 		//log.Debug("Read so many bytes or maybe got an error", "n", n, "addr", addr, "err", err)
@@ -536,7 +554,7 @@ func NewScmpHandler() *ScmpHandler {
 	s.RunDoneReceive = make(chan uint16, 2)
 	s.RunDoneSend = make(chan uint16, 2)
 	s.count = 0
-	s.StopValue = 10
+	s.StopValue = 10 //TODO: generalize this
 	//s.revocationHandler = sciond.RevHandler{Connector: integration.SDConn()}
 	return s
 }
@@ -565,6 +583,8 @@ func (s *ScmpHandler) CWHandle(pkt *snet.Packet, hdr *scmp.Hdr) error {
 			log.Debug("sent to receive ender ")
 		}
 		if s.ReadSend == false {
+			//Continue sending to avoid blocking the receive function in server
+			time.Sleep(MaxRTT)
 			s.RunDoneSend <- s.count
 			s.ReadSend = true
 			log.Debug("sent to send ender ")
@@ -574,13 +594,13 @@ func (s *ScmpHandler) CWHandle(pkt *snet.Packet, hdr *scmp.Hdr) error {
 }
 
 func (s *ScmpHandler) ResetHandler() {
-	log.Debug("are we able to reset?")
+	// log.Debug("are we able to reset?")
 	s.mtx.Lock()
 	s.count = 0
 	s.ReadSend = false
 	s.ReadReceive = false
 	s.mtx.Unlock()
-	log.Debug("we are able to reset!")
+	// log.Debug("we are able to reset!")
 }
 
 func (s *ScmpHandler) GetRunDones() (chan uint16, chan uint16) {
@@ -599,13 +619,13 @@ func (s *ScmpHandler) SendDone() {
 	s.mtx.Unlock()
 }
 
-func (res *DemoappResult) ResetResults(key []byte, expFinishTimeReceive time.Time) {
-	res.NumPacketsReceived = -1
-	res.CorrectlyReceived = -1
-	res.IPAavg = -1
-	res.IPAmin = -1
-	res.IPAavg = -1
-	res.IPAmax = -1
-	res.PrgKey = key
-	res.ExpectedFinishTime = expFinishTimeReceive
-}
+// func (res *DemoappResult) ResetResults(key []byte, expFinishTimeReceive time.Time) {
+// 	res.NumPacketsReceived = -1
+// 	res.CorrectlyReceived = -1
+// 	res.IPAavg = -1
+// 	res.IPAmin = -1
+// 	res.IPAavg = -1
+// 	res.IPAmax = -1
+// 	res.PrgKey = key
+// 	res.ExpectedFinishTime = expFinishTimeReceive
+// }
