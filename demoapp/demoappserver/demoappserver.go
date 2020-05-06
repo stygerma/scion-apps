@@ -38,8 +38,8 @@ var (
 	resultsMapLock sync.Mutex
 	currentDemoapp string // Contains connection parameters, in case server's ack packet was lost
 	DCConn         *snet.Conn
-	enderSend      chan struct{}
-	enderReceive   chan struct{}
+	enderSend      *chan struct{}
+	enderReceive   *chan struct{}
 	endedAlready   bool
 )
 
@@ -105,6 +105,8 @@ func runServer(port uint16) error {
 func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuffer []byte) {
 
 	for {
+		// fmt.Println("Are we getting here?108")
+
 		// Handle client requests
 		n, fromAddr, err := CCConn.ReadFrom(receivePacketBuffer)
 		clientCCAddr := fromAddr.(*snet.UDPAddr)
@@ -132,6 +134,8 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				}
 			}
 		}
+		// fmt.Println("Are we getting here?137")
+
 		clientCCAddrStr := clientCCAddr.String()
 		fmt.Println("Received request:", clientCCAddrStr, "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 
@@ -141,7 +145,10 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 
 			//TODO: for the second and further iteration kill iteration from before
 			// or check if everything is written; we don't want to enter this if clause
+
+			fmt.Println("currentDemoapp", currentDemoapp)
 			if len(currentDemoapp) != 0 {
+				fmt.Println(("Entered the if clause around line 150 in receiver"))
 				fmt.Println("A demoapp is already ongoing", clientCCAddrStr)
 				if clientCCAddrStr == currentDemoapp {
 					// The request is from the same client for which the current test is already ongoing
@@ -184,17 +191,20 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				// Decoding error, continue
 				continue
 			}
+			fmt.Println("Decoded client parameters")
 			serverBwp, n2, err := DecodeDemoappParameters(receivePacketBuffer[n1+1:])
 			if err != nil {
 				fmt.Println("Decoding error")
 				// Decoding error, continue
 				continue
 			}
+			fmt.Println("Decoded server parameters")
 			if n != 1+n1+n2 {
 				fmt.Println("Error, packet size incorrect")
 				// Do not send a response packet for malformed request
 				continue
 			}
+			fmt.Println("checked length")
 
 			// Address of client Data Connection (DC)
 			clientDCAddr := clientCCAddr.Copy()
@@ -213,8 +223,10 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				sendPacketBuffer[1] = byte(1)
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:2], clientCCAddr)
 				// Ignore error
+				fmt.Println("Error while opening data connection, err:", err)
 				continue
 			}
+			fmt.Println("opened data connection")
 
 			// Nothing needs to be added to account for network delay, since sending starts right away
 			expFinishTimeSend := t.Add(serverBwp.DemoappDuration + GracePeriodSend)
@@ -250,6 +262,8 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// Ignore error
 			// Everything succeeded, now set variable that demoapp is ongoing
 			currentDemoapp = clientCCAddrStr
+			// fmt.Println("Are we getting here? 255")
+
 		} else if receivePacketBuffer[0] == 'R' {
 			// This is a request for the results
 			fmt.Println("New results request:", time.Now().Format("2006-01-02 15:04:05.000000"))
@@ -276,9 +290,10 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 				enforcedFinish := time.Now()
 				_ = DCConn.SetReadDeadline(enforcedFinish)
 
-				close(enderReceive)
-				close(enderSend)
+				close(*enderReceive)
+				close(*enderSend)
 				endedAlready = true
+				fmt.Println("Sent ender in receiver, time:", time.Now().Format("2006-01-02 15:04:05.000000"))
 			}
 
 			// Note: it would be better to have the resultsMap key consist only of the PRG key,
@@ -301,6 +316,8 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			sendPacketBuffer[1] = byte(0)
 			n = EncodeDemoappResult(v, sendPacketBuffer[2:])
 			_, _ = CCConn.WriteTo(sendPacketBuffer[:n+2], clientCCAddr)
+			fmt.Println("Sent results from server")
+			currentDemoapp = ""
 		}
 	}
 }

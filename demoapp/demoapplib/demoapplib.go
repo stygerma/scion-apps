@@ -164,7 +164,7 @@ func DecodeDemoappParameters(buf []byte) (*DemoappParameters, int, error) {
 	return &v, is - bb.Len(), err
 }
 
-func HandleDCConnSendClient(bwp *DemoappParameters, udpConnection *snet.Conn, ender chan struct{}) {
+func HandleDCConnSendClient(bwp *DemoappParameters, udpConnection *snet.Conn, ender *chan struct{}) {
 
 	sb := make([]byte, bwp.PacketSize)
 	var i int64 = 0
@@ -178,7 +178,7 @@ func HandleDCConnSendClient(bwp *DemoappParameters, udpConnection *snet.Conn, en
 	}
 	for i < bwp.NumPackets {
 		select {
-		case <-ender:
+		case <-*ender:
 			fmt.Println("Ended the sender on client side", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 			return
 		default:
@@ -203,7 +203,7 @@ func HandleDCConnSendClient(bwp *DemoappParameters, udpConnection *snet.Conn, en
 	}
 }
 
-func HandleDCConnSendServer(bwp *DemoappParameters, udpConnection *snet.Conn) chan struct{} {
+func HandleDCConnSendServer(bwp *DemoappParameters, udpConnection *snet.Conn) *chan struct{} {
 	ender := make(chan struct{})
 	go func() {
 		sb := make([]byte, bwp.PacketSize)
@@ -242,10 +242,10 @@ func HandleDCConnSendServer(bwp *DemoappParameters, udpConnection *snet.Conn) ch
 			}
 		}
 	}()
-	return ender
+	return &ender
 }
 
-func HandleDCConnReceiveClient(bwp *DemoappParameters, udpConnection *snet.Conn, res *DemoappResult, resLock *sync.Mutex, done *sync.Mutex, ender chan struct{}) {
+func HandleDCConnReceiveClient(bwp *DemoappParameters, udpConnection *snet.Conn, res *DemoappResult, resLock *sync.Mutex, done *sync.Mutex, ender *chan struct{}) {
 	resLock.Lock()
 	finish := res.ExpectedFinishTime
 	resLock.Unlock()
@@ -257,7 +257,7 @@ func HandleDCConnReceiveClient(bwp *DemoappParameters, udpConnection *snet.Conn,
 	cmpBuf := make([]byte, bwp.PacketSize)
 	for time.Now().Before(finish) && correctlyReceived < bwp.NumPackets {
 		select {
-		case <-ender:
+		case <-*ender:
 			finish = time.Now()
 			log.Debug("ender received value", "enforced time", time.Now().Format("2006-01-02 15:04:05.000000"), "expected time", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"))
 			deadline := finish.Add(StragglerWaitPeriod)
@@ -269,8 +269,10 @@ func HandleDCConnReceiveClient(bwp *DemoappParameters, udpConnection *snet.Conn,
 			resLock.Unlock()
 			break
 		default:
-
+			// fmt.Println("About to read in receiver", time.Now().Format("2006-01-02 15:04:05.000000"))
 			n, err := udpConnection.Read(recBuf)
+			// fmt.Println("We read in receiver", time.Now().Format("2006-01-02 15:04:05.000000"))
+
 			// Ignore errors, todo: detect type of error and quit if it was because of a SetReadDeadline
 			if err != nil {
 				// If the ReadDeadline expired, then we should extend the finish time, which is
@@ -333,19 +335,20 @@ func HandleDCConnReceiveClient(bwp *DemoappParameters, udpConnection *snet.Conn,
 	// We're done here, let's see if we need to wait for the send function to complete so we can close the connection
 	// Note: the locking here is not strictly necessary, since ExpectedFinishTime is only updated right after
 	// initialization and in the code above, but it's good practice to do always lock when using the variable
-	eft := res.ExpectedFinishTime
+	// eft := time.Now().Add(MaxRTT)
 	resLock.Unlock()
 	if done != nil {
 		// Signal that we're done
 		done.Unlock()
 	}
-	if time.Now().Before(eft) {
-		time.Sleep(time.Until(eft))
-	}
-	_ = udpConnection.Close()
+	// if time.Now().Before(eft) {
+	// 	time.Sleep(time.Until(eft))
+	// }
+	// _ = udpConnection.Close()
+	fmt.Println("Closed connection")
 }
 
-func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn, res *DemoappResult, resLock *sync.Mutex, done *sync.Mutex) chan struct{} {
+func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn, res *DemoappResult, resLock *sync.Mutex, done *sync.Mutex) *chan struct{} {
 	ender := make(chan struct{})
 	go func() {
 		resLock.Lock()
@@ -432,7 +435,7 @@ func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn,
 				}
 			}
 		}
-
+		fmt.Println("Are we getting here in receiver of sender, finish", finish.Format("2006-01-02 15:04:05.000000"), "now", time.Now().Format("2006-01-02 15:04:05.000000"))
 		resLock.Lock()
 		res.NumPacketsReceived = numPacketsReceived
 		res.CorrectlyReceived = correctlyReceived
@@ -452,7 +455,7 @@ func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn,
 		}
 		_ = udpConnection.Close()
 	}()
-	return ender
+	return &ender
 }
 
 func aggrInterArrivalTime(bwr map[int]int64) (IPAvar, IPAmin, IPAavg, IPAmax int64) {
@@ -559,6 +562,18 @@ func (s *ScmpHandler) CWHandle(pkt *snet.Packet, hdr *scmp.Hdr) error {
 	return nil
 }
 
-func (s *ScmpHandler) GetEnders() (chan struct{}, chan struct{}) {
-	return s.EnderReceive, s.EnderSend
+func (s *ScmpHandler) ResetHandler() {
+	// log.Debug("are we able to reset?")
+	s.mtx.Lock()
+	s.count = 0
+	s.ReadSend = false
+	s.ReadReceive = false
+	s.EnderReceive = make(chan struct{})
+	s.EnderSend = make(chan struct{})
+	s.mtx.Unlock()
+	// log.Debug("we are able to reset!")
+}
+
+func (s *ScmpHandler) GetEnders() (*chan struct{}, *chan struct{}) {
+	return &s.EnderReceive, &s.EnderSend
 }
