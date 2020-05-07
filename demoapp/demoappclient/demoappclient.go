@@ -386,6 +386,14 @@ func main() {
 		// Data channel connection
 		DCConn, err = appnet.DefNetwork().Dial(
 			context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
+		if err != nil {
+			if err.Error() == "EOF" {
+				fmt.Println("entered if clause ")
+				// DCConn.Close()
+				DCConn, err = appnet.DefNetwork().Dial(
+					context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
+			}
+		}
 		Check(err, 15) //MS: often happens
 
 		// update default packet size to max MTU on the selected path
@@ -586,13 +594,24 @@ func main() {
 			fmt.Printf("Interarrival time min: %dms, interarrival time max: %dms\n",
 				sres.IPAmin/1e6, sres.IPAmax/1e6)
 			// return
-			DCConn.Close()
+			_ = DCConn.SetReadDeadline(tzero)
+			err = DCConn.Close()
+			if err != nil {
+				fmt.Println("Error while closing data connection in client after receiving results", "err", err)
+			}
+			time.Sleep(MaxRTT)
 			break
 		}
 		if numtries >= MaxTries {
-		fmt.Println("Error, could not fetch server results, MaxTries attempted without success.")
+			fmt.Println("Error, could not fetch server results, MaxTries attempted without success.")
+			_ = DCConn.SetReadDeadline(tzero)
+
+			err := DCConn.Close()
+			if err != nil {
+				fmt.Println("Error while closing data connection after failed reception of results", "err", err)
+			}
+			time.Sleep(MaxRTT)
 		}
-		DCConn.Close()
 	}
 
 }

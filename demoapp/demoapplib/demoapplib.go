@@ -52,6 +52,10 @@ const (
 	MaxRTT   time.Duration = time.Millisecond * 1000
 )
 
+var (
+	tzero time.Time
+)
+
 type DemoappParameters struct {
 	DemoappDuration time.Duration
 	PacketSize      int64
@@ -367,11 +371,13 @@ func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn,
 				fmt.Println("Ender signal received", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 				finish = time.Now()
 				fmt.Println("ender received value", "enforced time", time.Now().Format("2006-01-02 15:04:05.000000"), "expected time", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"))
+				_ = udpConnection.SetReadDeadline(finish)
 
 				if res.ExpectedFinishTime.Before(finish) {
 					resLock.Lock()
 					fmt.Println("finish times", "expected", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"), "enforced", finish.Format("2006-01-02 15:04:05.000000"))
 					res.EnforcedFinishTime = finish
+					res.EnforcedEnd = true
 					resLock.Unlock()
 				}
 				//finished = true
@@ -387,6 +393,7 @@ func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn,
 					// extended on the client side if no response is received from the server. On the server
 					// side, however, a short DemoappDuration with several consecutive packet losses would
 					// lead to closing the connection.
+					fmt.Println("Error while reading data connection in server", "err", err)
 					resLock.Lock()
 					finish = res.ExpectedFinishTime
 					resLock.Unlock()
@@ -444,16 +451,25 @@ func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn,
 		// We're done here, let's see if we need to wait for the send function to complete so we can close the connection
 		// Note: the locking here is not strictly necessary, since ExpectedFinishTime is only updated right after
 		// initialization and in the code above, but it's good practice to do always lock when using the variable
-		eft := res.ExpectedFinishTime
+		// eft := res.ExpectedFinishTime
+		forcedEnd := res.EnforcedEnd
 		resLock.Unlock()
+		if !forcedEnd {
+			_, _ = udpConnection.Read(recBuf)
+		}
 		if done != nil {
 			// Signal that we're done
 			done.Unlock()
 		}
-		if time.Now().Before(eft) {
-			time.Sleep(time.Until(eft))
+		// if time.Now().Before(eft) {
+		// 	time.Sleep(time.Until(eft))
+		// }
+		time.Sleep((time.Second / 2))
+		_ = udpConnection.SetReadDeadline(tzero)
+		err := udpConnection.Close()
+		if err != nil {
+			fmt.Println("Error while closing data connection", "err", err)
 		}
-		_ = udpConnection.Close()
 	}()
 	return &ender
 }

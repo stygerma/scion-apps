@@ -147,7 +147,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// or check if everything is written; we don't want to enter this if clause
 
 			fmt.Println("currentDemoapp", currentDemoapp)
-			if len(currentDemoapp) != 0 {
+			if len(currentDemoapp) != 0 && false {
 				fmt.Println(("Entered the if clause around line 150 in receiver"))
 				fmt.Println("A demoapp is already ongoing", clientCCAddrStr)
 				if clientCCAddrStr == currentDemoapp {
@@ -187,7 +187,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// This is a new request
 			clientBwp, n1, err := DecodeDemoappParameters(receivePacketBuffer[1:])
 			if err != nil {
-				fmt.Println("Decoding error")
+				fmt.Println("Decoding error, err", err)
 				// Decoding error, continue
 				continue
 			}
@@ -217,6 +217,14 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// Open Data Connection
 			DCConn, err = appnet.DefNetwork().Dial(
 				context.TODO(), "udp", serverDCAddr, clientDCAddr, addr.SvcNone)
+			if err != nil {
+				if err.Error() == "EOF" {
+					fmt.Println("entered if clause ")
+					// DCConn.Close()
+					DCConn, err = appnet.DefNetwork().Dial(
+						context.TODO(), "udp", serverDCAddr, clientDCAddr, addr.SvcNone)
+				}
+			}
 			if err != nil {
 				// An error happened, ask the client to try again in 1 second
 				sendPacketBuffer[0] = 'N'
@@ -273,6 +281,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			v, ok := resultsMap[clientCCAddrStr]
 			if !ok {
 				// There are no results for this client, return an error
+				fmt.Println("No available results for client", "ok", ok)
 				sendPacketBuffer[1] = byte(127)
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:2], clientCCAddr)
 				continue
@@ -280,6 +289,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// Make sure the PRG key is correct
 			if n != 1+len(v.PrgKey) || !bytes.Equal(v.PrgKey, receivePacketBuffer[1:1+len(v.PrgKey)]) {
 				// Error, the sent PRG is incorrect
+				fmt.Println("PRG key is incorrect ")
 				sendPacketBuffer[1] = byte(127)
 				_, _ = CCConn.WriteTo(sendPacketBuffer[:2], clientCCAddr)
 				continue
@@ -288,10 +298,11 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			//Stop reading in receiver, avoids blocking from readfunction
 			if !endedAlready {
 				enforcedFinish := time.Now()
-				_ = DCConn.SetReadDeadline(enforcedFinish)
 
 				close(*enderReceive)
 				close(*enderSend)
+				_ = DCConn.SetReadDeadline(enforcedFinish)
+
 				endedAlready = true
 				fmt.Println("Sent ender in receiver, time:", time.Now().Format("2006-01-02 15:04:05.000000"))
 			}
@@ -316,7 +327,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			sendPacketBuffer[1] = byte(0)
 			n = EncodeDemoappResult(v, sendPacketBuffer[2:])
 			_, _ = CCConn.WriteTo(sendPacketBuffer[:n+2], clientCCAddr)
-			fmt.Println("Sent results from server")
+			fmt.Println("Sent results from server", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 			currentDemoapp = ""
 		}
 	}
