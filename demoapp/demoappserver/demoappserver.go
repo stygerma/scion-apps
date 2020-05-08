@@ -40,7 +40,13 @@ var (
 	DCConn         *snet.Conn
 	enderSend      *chan struct{}
 	enderReceive   *chan struct{}
+	killerSend     *chan struct{}
+	killerReceive  *chan struct{}
+	killedReceive  sync.Mutex
+	killedSend     sync.Mutex
+	resultsReady   sync.Mutex
 	endedAlready   bool
+	resultsSent    bool
 )
 
 // Deletes the old entries in resultsMap
@@ -103,7 +109,8 @@ func runServer(port uint16) error {
 }
 
 func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuffer []byte) {
-
+	firstRun := true
+	killedPrevious := false
 	for {
 		// fmt.Println("Are we getting here?108")
 
@@ -143,8 +150,27 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// New demoapp request
 			fmt.Println("\n\nNew demoapp request")
 
-			//TODO: for the second and further iteration kill iteration from before
-			// or check if everything is written; we don't want to enter this if clause
+			//When receiving a new demoapp request while still working on a previous iteration
+			// we kill the previous iteration since the client already moved on and does not want
+			// the previous results
+			if !firstRun && currentDemoapp != "" {
+				fmt.Println("Killing previous connection")
+				currentDemoapp = ""
+				DCConn.SetReadDeadline(time.Now())
+				close(*killerSend)
+				close(*killerReceive)
+				time.Sleep(time.Nanosecond * 4000000)
+				fmt.Println("killed sender")
+				killedSend.Lock()
+				fmt.Println("Able to lock killedsenderlock")
+				killedSend.Unlock()
+				fmt.Println("killed receiver")
+				killedReceive.Lock()
+				fmt.Println("Able to lock killedreceiverlock")
+				killedSend.Unlock()
+				fmt.Println("Killed previous connection")
+				killedPrevious = true
+			}
 
 			fmt.Println("currentDemoapp", currentDemoapp)
 			if len(currentDemoapp) != 0 && false {
@@ -183,6 +209,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			}
 
 			endedAlready = false
+			resultsSent = false
 
 			// This is a new request
 			clientBwp, n1, err := DecodeDemoappParameters(receivePacketBuffer[1:])
@@ -217,14 +244,15 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// Open Data Connection
 			DCConn, err = appnet.DefNetwork().Dial(
 				context.TODO(), "udp", serverDCAddr, clientDCAddr, addr.SvcNone)
-			if err != nil {
-				if err.Error() == "EOF" {
-					fmt.Println("entered if clause ")
-					// DCConn.Close()
-					DCConn, err = appnet.DefNetwork().Dial(
-						context.TODO(), "udp", serverDCAddr, clientDCAddr, addr.SvcNone)
-				}
-			}
+			// if err != nil {
+			// 	if err.Error() == "EOF" {
+			// 		fmt.Println("entered if clause ")
+			// 		// DCConn.Close()
+			// 		DCConn, err = appnet.DefNetwork().Dial(
+			// 			context.TODO(), "udp", serverDCAddr, clientDCAddr, addr.SvcNone)
+			// 	}
+			// }
+			// DCConn, err = appnet.ListenPort(uint16(serverDCAddr.Port))
 			if err != nil {
 				// An error happened, ask the client to try again in 1 second
 				sendPacketBuffer[0] = 'N'
@@ -259,10 +287,17 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			resultsMap[clientCCAddrStr] = &bres
 			resultsMapLock.Unlock()
 
-			// go HandleDCConnReceive(clientBwp, DCConn, resChan)
-			enderReceive = HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, nil)
-			enderSend = HandleDCConnSendServer(serverBwp, DCConn)
+			if firstRun || killedPrevious {
+				killedReceive.Lock()
+				killedSend.Lock()
+				fmt.Println("Locked killLocks")
 
+			}
+			resultsReady = sync.Mutex{}
+			// go HandleDCConnReceive(clientBwp, DCConn, resChan)
+			enderReceive, killerReceive = HandleDCConnReceiveServer(clientBwp, DCConn, &bres, &resultsMapLock, &resultsReady, &killedReceive)
+			enderSend, killerSend = HandleDCConnSendServer(serverBwp, DCConn, &killedSend) //, clientDCAddr
+			resultsReady.Lock()
 			// Send back success
 			sendPacketBuffer[0] = 'N'
 			sendPacketBuffer[1] = byte(0)
@@ -271,9 +306,12 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			// Everything succeeded, now set variable that demoapp is ongoing
 			currentDemoapp = clientCCAddrStr
 			// fmt.Println("Are we getting here? 255")
-
+			firstRun = false
 		} else if receivePacketBuffer[0] == 'R' {
 			// This is a request for the results
+			if resultsSent {
+				continue
+			}
 			fmt.Println("New results request:", time.Now().Format("2006-01-02 15:04:05.000000"))
 
 			sendPacketBuffer[0] = 'R'
@@ -305,6 +343,8 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 
 				endedAlready = true
 				fmt.Println("Sent ender in receiver, time:", time.Now().Format("2006-01-02 15:04:05.000000"))
+				resultsReady.Lock()
+				resultsReady.Unlock()
 			}
 
 			// Note: it would be better to have the resultsMap key consist only of the PRG key,
@@ -329,6 +369,7 @@ func handleClients(CCConn *snet.Conn, receivePacketBuffer []byte, sendPacketBuff
 			_, _ = CCConn.WriteTo(sendPacketBuffer[:n+2], clientCCAddr)
 			fmt.Println("Sent results from server", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 			currentDemoapp = ""
+			resultsSent = true
 		}
 	}
 }

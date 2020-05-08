@@ -123,6 +123,21 @@ func DialAddr(raddr *snet.UDPAddr) (*snet.Conn, error) {
 	return DefNetwork().Dial(context.Background(), "udp", laddr, raddr, addr.SvcNone)
 }
 
+func DialAddrCustomNetwork(laddr *net.UDPAddr, raddr *snet.UDPAddr, network *snet.SCIONNetwork) (*snet.Conn, error) {
+	if raddr.Path == nil {
+		err := SetDefaultPath(raddr)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// localIP, err := resolveLocal(raddr)
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// laddr := &net.UDPAddr{IP: localIP}
+	return network.Dial(context.Background(), "udp", laddr, raddr, addr.SvcNone)
+}
+
 // Listen acts like net.ListenUDP in a SCION network.
 // The listen address or parts of it may be nil or unspecified, signifying to
 // listen on a wildcard address.

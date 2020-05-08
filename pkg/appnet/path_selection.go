@@ -179,3 +179,17 @@ func selectLargestMTUPath(paths []snet.Path) (selectedPath snet.Path, metric flo
 	}
 	return selectedPath, metricFn(selectedPath.MTU())
 }
+
+func ReselectPath(path snet.Path, ai addr.IA) snet.Path {
+	paths, _ := QueryPaths(ai)
+	if paths == nil {
+		return nil
+	}
+	for _, candidate := range paths {
+		if candidate.Fingerprint() == path.Fingerprint() {
+			continue
+		}
+		return candidate
+	}
+	return nil
+}

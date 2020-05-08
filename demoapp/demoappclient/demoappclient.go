@@ -24,6 +24,7 @@ import (
 	"crypto/rand"
 	"flag"
 	"fmt"
+	rnd "math/rand"
 	"net"
 	"os"
 	"strconv"
@@ -37,6 +38,7 @@ import (
 
 	"github.com/scionproto/scion/go/lib/addr"
 	"github.com/scionproto/scion/go/lib/log"
+	"github.com/scionproto/scion/go/lib/sciond"
 	"github.com/scionproto/scion/go/lib/snet"
 	"github.com/scionproto/scion/go/lib/sock/reliable"
 ) //"github.com/scionproto/scion/bazel-scion/external/com_github_prometheus_common/log"
@@ -50,6 +52,7 @@ const (
 	WildcardChar             = "?"
 	DefaultIterations        = 5
 	DefaultStopValue         = 50
+	DefaultSmartness         = 1
 	MaxRTT                   = time.Millisecond * 1000
 )
 
@@ -275,10 +278,12 @@ func main() {
 
 		receiveDone sync.Mutex // used to signal when the HandleDCConnReceive goroutine has completed
 
-		iterationsNr uint
-		//overallResults []DemoappResult
+		iterationsNr     uint
+		overallResults   []DemoappResult
 		clientISDAS      string
 		handlerStopValue int
+		hostSmartness    uint
+		previousPaths    []*snet.Path
 	)
 
 	flag.Usage = printUsage
@@ -290,6 +295,7 @@ func main() {
 	flag.UintVar(&iterationsNr, "iter", DefaultIterations, "Number of iterations done of demoapp")
 	flag.StringVar(&clientISDAS, "client", "", "Client ISD and AS")
 	flag.IntVar(&handlerStopValue, "stopVal", DefaultStopValue, "Amount of CW SCMPs received until we furcefully stop the demoapp")
+	flag.UintVar(&hostSmartness, "smart", DefaultSmartness, "level of smartness of end host that is simulated by scmph")
 
 	flag.Parse()
 	flagset := make(map[string]bool)
@@ -308,7 +314,7 @@ func main() {
 	if err != nil {
 		Check(fmt.Errorf("Invalid ISD AS combination given for client"), 25)
 	}
-	//overallResults = make([]DemoappResult, iterationsNr*2)
+	overallResults = make([]DemoappResult, iterationsNr*2)
 	fmt.Println("Number of iterations", iterationsNr)
 
 	if len(serverCCAddrStr) > 0 {
@@ -319,23 +325,29 @@ func main() {
 		Check(fmt.Errorf("Error, server address needs to be specified with -s"), 11)
 	}
 
+	previousPaths = make([]*snet.Path, 5)
+
 	var path snet.Path
-	if interactive {
-		path, err = appnet.ChoosePathInteractive(serverCCAddr.IA)
-		Check(err, 12)
-	} else {
-		var metric int
-		if pathAlgo == "mtu" {
-			metric = appnet.MTU
-		} else if pathAlgo == "shortest" {
-			metric = appnet.Shortest
-		}
-		path, err = appnet.ChoosePathByMetric(metric, serverCCAddr.IA)
-		Check(err, 13)
-	}
+
+	var metric int
+
+	path, err = appnet.ChoosePathByMetric(metric, serverCCAddr.IA)
+	Check(err, 13)
+	// }
 	if path != nil {
 		appnet.SetPath(serverCCAddr, path)
+		previousPaths[0] = &path
 	}
+
+	// paths, _ := appnet.QueryPaths(serverCCAddr.IA)
+	// fmt.Println("available paths", paths)
+
+	// newpath := appnet.ReselectPath(path, serverCCAddr.IA)
+	// fmt.Println("new path chosen, path", newpath)
+
+	// if newpath != nil {
+	// 	appnet.SetPath(serverCCAddr, path)
+	// }
 
 	CCConn, err = appnet.DialAddr(serverCCAddr)
 	Check(err, 14)
@@ -358,12 +370,12 @@ func main() {
 	timeout := 30 * time.Second
 	ctx, cancelF := context.WithTimeout(context.Background(), timeout)
 	defer cancelF()
-
-	scmpH := NewScmpHandler(handlerStopValue)
+	dispatcher := reliable.NewDispatcher("")
+	scmpH := NewScmpHandler(handlerStopValue, hostSmartness)
 	//as, _ := addr.ASFromString("ff00:0:113") //TODO: generalize this
 	network := snet.NewCustomNetworkWithPR(client,
 		&snet.DefaultPacketDispatcherService{
-			Dispatcher:  reliable.NewDispatcher(""),
+			Dispatcher:  dispatcher,
 			SCMPHandler: scmpH,
 		},
 	)
@@ -377,23 +389,64 @@ func main() {
 	go HandleHelpConnReceive(helperConn)
 
 	enderReceive, EnderSend := scmpH.GetEnders()
+	nrOfEnds := 0
 
-	//TODO: add loop: reset handler there
 	for i := 0; i < int(iterationsNr); i++ {
 		fmt.Printf("========================================\n new iteration \n======================================== \n")
 
-		scmpH.ResetHandler()
-		// Data channel connection
-		DCConn, err = appnet.DefNetwork().Dial(
-			context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
-		if err != nil {
-			if err.Error() == "EOF" {
-				fmt.Println("entered if clause ")
-				// DCConn.Close()
-				DCConn, err = appnet.DefNetwork().Dial(
-					context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
-			}
+		if scmpH.EndedConn {
+			nrOfEnds++
+			fmt.Println("Increased number of ends, new value", nrOfEnds)
 		}
+		endedConn := scmpH.EndedConn
+		if endedConn && nrOfEnds == 1 { //&& false
+			// appnet.ResetPath(client)
+			decider := rnd.Intn(2)
+			if decider == 1 {
+				// fmt.Println("Changing path")
+				// serverPath, _ := serverDCAddr.GetPath()
+				// fmt.Println("path to server", fmt.Sprintf("%s", serverPath))
+
+				// paths, _ := appnet.QueryPaths(serverCCAddr.IA)
+				// fmt.Println("available paths", paths)
+
+				newpath := appnet.ReselectPath(path, serverDCAddr.IA)
+				// fmt.Println("new path chosen, path", newpath)
+
+				if newpath != nil {
+					appnet.SetPath(serverDCAddr, newpath)
+					fmt.Println("Path set in data connection address, path:", path)
+				}
+			}
+			fmt.Println("Sticking to current path")
+		}
+
+		scmpH.ResetHandler()
+		sciondAddr := os.Getenv("SCION_DAEMON_ADDRESS")
+		sciondConn, err := sciond.NewService(sciondAddr).Connect(context.Background())
+		if err != nil {
+			fmt.Println("Unable to initialize Data network", "err", err)
+		}
+		dataNetwork := snet.NewNetworkWithPR(client, dispatcher, sciond.Querier{
+			Connector: sciondConn,
+			IA:        client,
+		}, sciond.RevHandler{Connector: sciondConn})
+
+		//Provides connection with revocation handler, while offering the selection
+		// of the used path
+		DCConn, err = appnet.DialAddrCustomNetwork(clientDCAddr, serverDCAddr, dataNetwork)
+		// Data channel connection
+		// DCConn, err = appnet.DefNetwork().Dial(
+		// 	context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
+		// DCConn, err = appnet.DialAddr(serverDCAddr)
+		// if err != nil {
+		// 	if err.Error() == "EOF" {
+		// 		fmt.Println("entered if clause ")
+		// 		// DCConn.Close()
+		// 		DCConn, err = appnet.DefNetwork().Dial(
+		// 			context.TODO(), "udp", clientDCAddr, serverDCAddr, addr.SvcNone)
+		// 	}
+		// }
 		Check(err, 15) //MS: often happens
 
 		// update default packet size to max MTU on the selected path
@@ -415,6 +468,13 @@ func main() {
 		}
 		serverBwp = parseDemoappParameters(serverBwpStr)
 		serverBwp.Port = uint16(serverDCAddr.Host.Port)
+
+		if nrOfEnds > 1 && endedConn {
+			fmt.Println("Decreasing number of packets")
+			clientBwp.NumPackets -= int64(100 * (nrOfEnds - 1))
+			serverBwp.NumPackets -= int64(10 * (nrOfEnds - 1))
+		}
+
 		fmt.Println("\nTest parameters:")
 		fmt.Println("clientDCAddr -> serverDCAddr", clientDCAddr, "->", serverDCAddr)
 		fmt.Printf("client->server: %d seconds, %d bytes, %d packets\n",
@@ -508,6 +568,9 @@ func main() {
 		receiveDone.Unlock()
 
 		fmt.Println("\nS->C results")
+		if scmpH.EndedConn {
+			fmt.Println("Starting time", res.StartingTime, "Enforced finish time", res.EnforcedFinishTime)
+		}
 		att := 8 * serverBwp.PacketSize * serverBwp.NumPackets / int64(serverBwp.DemoappDuration/time.Second)
 		ach := 8 * serverBwp.PacketSize * res.CorrectlyReceived / int64(serverBwp.DemoappDuration/time.Second)
 		fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
@@ -521,6 +584,7 @@ func main() {
 		fmt.Printf("Interarrival time min: %dms, interarrival time max: %dms\n",
 			res.IPAmin/1e6, res.IPAmax/1e6)
 
+		overallResults[i*2] = res
 		// Fetch results from server
 		numtries = 0
 		for numtries < MaxTries {
@@ -599,7 +663,10 @@ func main() {
 			if err != nil {
 				fmt.Println("Error while closing data connection in client after receiving results", "err", err)
 			}
+			fmt.Println("Closed connection")
+
 			time.Sleep(MaxRTT)
+			overallResults[i*2+1] = *sres
 			break
 		}
 		if numtries >= MaxTries {
@@ -610,8 +677,11 @@ func main() {
 			if err != nil {
 				fmt.Println("Error while closing data connection after failed reception of results", "err", err)
 			}
+			fmt.Println("Closed connection")
+
 			time.Sleep(MaxRTT)
 		}
 	}
+	fmt.Println("Overall results", overallResults)
 
 }
