@@ -279,7 +279,7 @@ func main() {
 		receiveDone sync.Mutex // used to signal when the HandleDCConnReceive goroutine has completed
 
 		iterationsNr     uint
-		overallResults   []DemoappResult
+		overallTime      time.Duration
 		clientISDAS      string
 		handlerStopValue int
 		hostSmartness    uint
@@ -314,7 +314,6 @@ func main() {
 	if err != nil {
 		Check(fmt.Errorf("Invalid ISD AS combination given for client"), 25)
 	}
-	overallResults = make([]DemoappResult, iterationsNr*2)
 	fmt.Println("Number of iterations", iterationsNr)
 
 	if len(serverCCAddrStr) > 0 {
@@ -372,7 +371,6 @@ func main() {
 	defer cancelF()
 	dispatcher := reliable.NewDispatcher("")
 	scmpH := NewScmpHandler(handlerStopValue, hostSmartness)
-	//as, _ := addr.ASFromString("ff00:0:113") //TODO: generalize this
 	network := snet.NewCustomNetworkWithPR(client,
 		&snet.DefaultPacketDispatcherService{
 			Dispatcher:  dispatcher,
@@ -396,10 +394,10 @@ func main() {
 
 		if scmpH.EndedConn {
 			nrOfEnds++
-			fmt.Println("Increased number of ends, new value", nrOfEnds)
+			// fmt.Println("Increased number of ends, new value", nrOfEnds)
 		}
 		endedConn := scmpH.EndedConn
-		if endedConn && nrOfEnds == 1 { //&& false
+		if endedConn && nrOfEnds == 5 { //&& false
 			// appnet.ResetPath(client)
 			decider := rnd.Intn(2)
 			if decider == 1 {
@@ -448,31 +446,35 @@ func main() {
 		// 	}
 		// }
 		Check(err, 15) //MS: often happens
-
-		// update default packet size to max MTU on the selected path
-		if path != nil {
-			InferedPktSize = int64(path.MTU())
-		} else {
-			// use default packet size when within same AS and pathEntry is not set
-			InferedPktSize = DefaultPktSize
+		if i == 0 {
+			// update default packet size to max MTU on the selected path
+			if path != nil {
+				InferedPktSize = int64(path.MTU())
+			} else {
+				// use default packet size when within same AS and pathEntry is not set
+				InferedPktSize = DefaultPktSize
+			}
+			if !flagset["cs"] && flagset["sc"] { // Only one direction set, used same for reverse
+				clientBwpStr = serverBwpStr
+				fmt.Println("Only sc parameter set, using same values for cs")
+			}
+			clientBwp = parseDemoappParameters(clientBwpStr)
+			clientBwp.Port = uint16(clientDCAddr.Port)
+			if !flagset["sc"] && flagset["cs"] { // Only one direction set, used same for reverse
+				serverBwpStr = clientBwpStr
+				fmt.Println("Only cs parameter set, using same values for sc")
+			}
+			serverBwp = parseDemoappParameters(serverBwpStr)
+			serverBwp.Port = uint16(serverDCAddr.Host.Port)
 		}
-		if !flagset["cs"] && flagset["sc"] { // Only one direction set, used same for reverse
-			clientBwpStr = serverBwpStr
-			fmt.Println("Only sc parameter set, using same values for cs")
-		}
-		clientBwp = parseDemoappParameters(clientBwpStr)
-		clientBwp.Port = uint16(clientDCAddr.Port)
-		if !flagset["sc"] && flagset["cs"] { // Only one direction set, used same for reverse
-			serverBwpStr = clientBwpStr
-			fmt.Println("Only cs parameter set, using same values for sc")
-		}
-		serverBwp = parseDemoappParameters(serverBwpStr)
-		serverBwp.Port = uint16(serverDCAddr.Host.Port)
-
-		if nrOfEnds > 1 && endedConn {
+		if endedConn {
 			fmt.Println("Decreasing number of packets")
-			clientBwp.NumPackets -= int64(100 * (nrOfEnds - 1))
-			serverBwp.NumPackets -= int64(10 * (nrOfEnds - 1))
+			clientBwp.NumPackets = clientBwp.NumPackets * 3 / 4
+			serverBwp.NumPackets = serverBwp.NumPackets * 3 / 4
+		} else if hostSmartness > 0 && i > 0 {
+			fmt.Println("Increasing the number of packets")
+			clientBwp.NumPackets += 500
+			serverBwp.NumPackets += 10
 		}
 
 		fmt.Println("\nTest parameters:")
@@ -568,23 +570,36 @@ func main() {
 		receiveDone.Unlock()
 
 		fmt.Println("\nS->C results")
+		var att int64
+		var ach int64
 		if scmpH.EndedConn {
-			fmt.Println("Starting time", res.StartingTime, "Enforced finish time", res.EnforcedFinishTime)
-		}
-		att := 8 * serverBwp.PacketSize * serverBwp.NumPackets / int64(serverBwp.DemoappDuration/time.Second)
-		ach := 8 * serverBwp.PacketSize * res.CorrectlyReceived / int64(serverBwp.DemoappDuration/time.Second)
-		fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
-		fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
-		fmt.Println("Loss rate:", (serverBwp.NumPackets-res.CorrectlyReceived)*100/serverBwp.NumPackets, "%")
-		fmt.Printf("Number of packets received %d\n", res.CorrectlyReceived)
-		variance := res.IPAvar
-		average := res.IPAavg
-		fmt.Printf("Interarrival time variance: %dms, average interarrival time: %dms\n",
-			variance/1e6, average/1e6)
-		fmt.Printf("Interarrival time min: %dms, interarrival time max: %dms\n",
-			res.IPAmin/1e6, res.IPAmax/1e6)
+			EnforcedDuration := res.EnforcedFinishTime.Sub(res.StartingTime)
+			att = 8 * serverBwp.PacketSize * serverBwp.NumPackets / int64(serverBwp.DemoappDuration/time.Second)
+			ach = 8 * serverBwp.PacketSize * res.CorrectlyReceived / int64(EnforcedDuration/time.Second)
+			averagePackets := serverBwp.NumPackets / int64(serverBwp.DemoappDuration/time.Second)
+			expectedEnforced := averagePackets * int64(EnforcedDuration/time.Second)
+			fmt.Println("Starting time", res.StartingTime, "Enforced finish time", res.EnforcedFinishTime, "\nApproximated Duration", EnforcedDuration)
+			fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
+			fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
+			fmt.Printf("Number of packets received %d\n", res.CorrectlyReceived)
+			fmt.Println("Loss rate:", (expectedEnforced-res.CorrectlyReceived)*100/serverBwp.NumPackets, "%")
+			overallTime += EnforcedDuration
 
-		overallResults[i*2] = res
+		} else {
+			att = 8 * serverBwp.PacketSize * serverBwp.NumPackets / int64(serverBwp.DemoappDuration/time.Second)
+			ach = 8 * serverBwp.PacketSize * res.CorrectlyReceived / int64(serverBwp.DemoappDuration/time.Second)
+			fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
+			fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
+			fmt.Println("Loss rate:", (serverBwp.NumPackets-res.CorrectlyReceived)*100/serverBwp.NumPackets, "%")
+			fmt.Printf("Number of packets received %d\n", res.CorrectlyReceived)
+			variance := res.IPAvar
+			average := res.IPAavg
+			fmt.Printf("Interarrival time variance: %dms, average interarrival time: %dms\n",
+				variance/1e6, average/1e6)
+			fmt.Printf("Interarrival time min: %dms, interarrival time max: %dms\n",
+				res.IPAmin/1e6, res.IPAmax/1e6)
+			overallTime += time.Second * 10
+		}
 		// Fetch results from server
 		numtries = 0
 		for numtries < MaxTries {
@@ -644,19 +659,30 @@ func main() {
 				continue
 			}
 			fmt.Println("\nC->S results")
-			att = 8 * clientBwp.PacketSize * clientBwp.NumPackets / int64(clientBwp.DemoappDuration/time.Second)
-			ach = 8 * clientBwp.PacketSize * sres.CorrectlyReceived / int64(clientBwp.DemoappDuration/time.Second)
-			fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
-			fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
-			fmt.Printf("Number of packets received: %v\n", sres.NumPacketsReceived)
-			fmt.Println("Loss rate:", (clientBwp.NumPackets-sres.CorrectlyReceived)*100/clientBwp.NumPackets, "%")
-			fmt.Printf("Number of packets received %d\n", sres.CorrectlyReceived)
-			variance := sres.IPAvar
-			average := sres.IPAavg
-			fmt.Printf("Interarrival time variance: %dms, average interarrival time: %dms\n",
-				variance/1e6, average/1e6)
-			fmt.Printf("Interarrival time min: %dms, interarrival time max: %dms\n",
-				sres.IPAmin/1e6, sres.IPAmax/1e6)
+			if scmpH.EndedConn {
+				EnforcedDuration := sres.EnforcedFinishTime.Sub(sres.StartingTime)
+				att = 8 * clientBwp.PacketSize * clientBwp.NumPackets / int64(clientBwp.DemoappDuration/time.Second)
+				ach = 8 * int64(float64(clientBwp.PacketSize*sres.CorrectlyReceived)/float64(EnforcedDuration/time.Second))
+				fmt.Println("Starting time", res.StartingTime, "Enforced finish time", res.EnforcedFinishTime, "\nApproximated Duration", EnforcedDuration)
+				fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
+				fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
+				fmt.Printf("Number of packets received %d\n", sres.CorrectlyReceived)
+
+			} else {
+				att = 8 * clientBwp.PacketSize * clientBwp.NumPackets / int64(clientBwp.DemoappDuration/time.Second)
+				ach = 8 * clientBwp.PacketSize * sres.CorrectlyReceived / int64(clientBwp.DemoappDuration/time.Second)
+				fmt.Printf("Attempted bandwidth: %d bps / %.2f Mbps\n", att, float64(att)/1000000)
+				fmt.Printf("Achieved bandwidth: %d bps / %.2f Mbps\n", ach, float64(ach)/1000000)
+				fmt.Printf("Number of packets received: %v\n", sres.NumPacketsReceived)
+				fmt.Println("Loss rate:", (clientBwp.NumPackets-sres.CorrectlyReceived)*100/clientBwp.NumPackets, "%")
+				fmt.Printf("Number of packets received %d\n", sres.CorrectlyReceived)
+				variance := sres.IPAvar
+				average := sres.IPAavg
+				fmt.Printf("Interarrival time variance: %dms, average interarrival time: %dms\n",
+					variance/1e6, average/1e6)
+				fmt.Printf("Interarrival time min: %dms, interarrival time max: %dms\n",
+					sres.IPAmin/1e6, sres.IPAmax/1e6)
+			}
 			// return
 			_ = DCConn.SetReadDeadline(tzero)
 			err = DCConn.Close()
@@ -666,7 +692,6 @@ func main() {
 			fmt.Println("Closed connection")
 
 			time.Sleep(MaxRTT)
-			overallResults[i*2+1] = *sres
 			break
 		}
 		if numtries >= MaxTries {
@@ -682,6 +707,6 @@ func main() {
 			time.Sleep(MaxRTT)
 		}
 	}
-	fmt.Println("Overall results", overallResults)
+	fmt.Println("Approximated operation time", overallTime.Seconds())
 
 }

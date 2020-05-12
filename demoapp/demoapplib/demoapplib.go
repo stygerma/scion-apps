@@ -184,7 +184,7 @@ func HandleDCConnSendClient(bwp *DemoappParameters, udpConnection *snet.Conn, en
 	for i < bwp.NumPackets {
 		select {
 		case <-*ender:
-			fmt.Println("Ended the sender on client side", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
+			// fmt.Println("Ended the sender on client side", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 			return
 		default:
 			// Compute how long to wait
@@ -233,7 +233,7 @@ func HandleDCConnSendServer(bwp *DemoappParameters, udpConnection *snet.Conn, ki
 			default:
 				select {
 				case <-ender:
-
+					return
 				default:
 					// Compute how long to wait
 					t1 := time.Now()
@@ -381,6 +381,7 @@ func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn,
 	go func() {
 		resLock.Lock()
 		finish := res.ExpectedFinishTime
+		res.StartingTime = time.Now()
 		resLock.Unlock()
 		var numPacketsReceived, correctlyReceived int64 = 0, 0
 		InterPacketArrivalTime := make(map[int]int64)
@@ -410,13 +411,12 @@ func HandleDCConnReceiveServer(bwp *DemoappParameters, udpConnection *snet.Conn,
 					fmt.Println("ender received value", "enforced time", time.Now().Format("2006-01-02 15:04:05.000000"), "expected time", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"))
 					_ = udpConnection.SetReadDeadline(finish)
 
-					if res.ExpectedFinishTime.Before(finish) {
-						resLock.Lock()
-						fmt.Println("finish times", "expected", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"), "enforced", finish.Format("2006-01-02 15:04:05.000000"))
-						res.EnforcedFinishTime = finish
-						res.EnforcedEnd = true
-						resLock.Unlock()
-					}
+					resLock.Lock()
+					fmt.Println("finish times", "expected", res.ExpectedFinishTime.Format("2006-01-02 15:04:05.000000"), "enforced", finish.Format("2006-01-02 15:04:05.000000"), "enforced duration", finish.Sub(res.StartingTime))
+					res.EnforcedFinishTime = finish
+					res.EnforcedEnd = true
+					resLock.Unlock()
+
 					//finished = true
 					break
 					// } else {
@@ -574,6 +574,7 @@ type ScmpHandler struct {
 	EndedConn    bool
 	Smartness    uint
 	ConnEndsNr   int
+	Approach     uint
 }
 
 func NewScmpHandler(n int, smartness uint) *ScmpHandler {
@@ -596,7 +597,7 @@ func (s *ScmpHandler) Handle(pkt *snet.Packet) error {
 	s.mtx.Lock()
 	if pkt.L4Header.L4Type() == common.L4SCMP {
 		hdr := pkt.L4Header.(*scmp.Hdr)
-		if hdr.Class == scmp.C_General && hdr.Type == scmp.T_G_BasicCongWarn {
+		if hdr.Class == scmp.C_General && (hdr.Type == scmp.T_G_BasicCongWarn || hdr.Type == scmp.T_G_StochasticCongWarn) {
 			s.CWHandle(pkt, hdr)
 		}
 	}
@@ -606,21 +607,23 @@ func (s *ScmpHandler) Handle(pkt *snet.Packet) error {
 }
 
 func (s *ScmpHandler) CWHandle(pkt *snet.Packet, hdr *scmp.Hdr) error {
-	log.Debug("Got scmp in handler", "count", s.count, "time", time.Now()) //, "pkt", pkt.PacketInfo
+	if s.count == 0 {
+		log.Debug("Got scmp in handler", "count", s.count, "time", time.Now()) //, "pkt", pkt.PacketInfo
+	}
 	s.count++
 	// log.Debug("amount of SCMP CWs handled ", "count", s.count)
 	if s.count >= uint16(s.StopValue) {
 		if s.ReadReceive == false {
 			close(s.EnderReceive)
 			s.ReadReceive = true
-			log.Debug("sent to receive ender", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
+			// log.Debug("sent to receive ender", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 		}
 		if s.ReadSend == false {
 			//Continue sending to avoid blocking the receive function in server
 			//time.Sleep(MaxRTT)
 			close(s.EnderSend)
 			s.ReadSend = true
-			log.Debug("sent to send ender", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
+			// log.Debug("sent to send ender", "time", time.Now().Format("2006-01-02 15:04:05.000000"))
 		}
 		s.EndedConn = true
 		s.ConnEndsNr++

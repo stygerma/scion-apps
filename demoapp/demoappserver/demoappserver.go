@@ -94,6 +94,7 @@ func main() {
 	if err != nil {
 		LogFatal("Unable to start server", "err", err)
 	}
+	fmt.Println("\n===================================================\n new Demoapp\n=================================================== ")
 }
 
 func runServer(port uint16) error {
