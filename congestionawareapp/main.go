@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"math/rand"
@@ -11,8 +12,10 @@ import (
 
 	"github.com/netsec-ethz/scion-apps/pkg/appnet"
 	"github.com/scionproto/scion/go/lib/addr"
+	"github.com/scionproto/scion/go/lib/scmp"
 	"github.com/scionproto/scion/go/lib/snet"
 	"github.com/scionproto/scion/go/lib/sock/reliable"
+	"github.com/scionproto/scion/go/lib/spath"
 )
 
 const (
@@ -66,53 +69,47 @@ func runClient(remote string) error {
 type client struct {
 	serverAddr *snet.UDPAddr
 	clientAddr *net.UDPAddr
-	paths      []snet.Path
+	paths      PathMap
 	scmpConn   *snet.Conn
 }
 
 func (c *client) run(remote string) error {
 	var err error
-	if err = c.init(); err != nil {
+	if err = c.init(remote); err != nil {
 		return err
 	}
 	defer c.shutdown()
-	c.serverAddr, err = appnet.ResolveUDPAddr(remote)
-	if err != nil {
-		return err
-	}
-	c.paths, err = appnet.QueryPaths(c.serverAddr.IA)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Found %d paths to destination\n", len(c.paths))
-	if len(c.paths) < 2 {
-		return fmt.Errorf("This application needs at least two paths to destination")
-	}
 
-	conn, err := appnet.DefNetwork().Dial(context.TODO(), "udp", c.clientAddr, c.serverAddr, addr.SvcNone)
-	if err != nil {
-		return err
-	}
-	defer conn.Close()
-
-	err = c.loopSendMessages(conn)
+	err = c.loopSendMessages(c.scmpConn)
 	fmt.Println("done.")
 	return err
 }
 
-func (c *client) init() error {
+func (c *client) init(remote string) error {
 	var err error
 	rand.Seed(88)
 	c.clientAddr = &net.UDPAddr{IP: net.ParseIP("127.0.0.1")}
+	c.serverAddr, err = appnet.ResolveUDPAddr(remote)
+	if err != nil {
+		return err
+	}
+	paths, err := appnet.QueryPaths(c.serverAddr.IA)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Found %d paths to destination\n", len(paths))
+	if len(paths) < 1 { // TODO(juagargi) it should quit if less than 2
+		return fmt.Errorf("This application needs at least two paths to destination")
+	}
+	c.paths = *newPathMap(paths)
 
-	dispatcher := reliable.NewDispatcher("")
 	network := snet.NewCustomNetworkWithPR(appnet.DefNetwork().IA,
 		&snet.DefaultPacketDispatcherService{
-			Dispatcher:  dispatcher,
+			Dispatcher:  reliable.NewDispatcher(""),
 			SCMPHandler: c,
 		},
 	)
-	c.scmpConn, err = network.Listen(context.TODO(), "udp", c.clientAddr, addr.SvcNone)
+	c.scmpConn, err = network.Dial(context.TODO(), "udp", c.clientAddr, c.serverAddr, addr.SvcNone)
 	if err != nil {
 		return err
 	}
@@ -144,9 +141,12 @@ func (c *client) loopSendMessages(conn *snet.Conn) error {
 			time.Sleep(time.Second)
 		}
 		p := c.selectBestPath()
-		appnet.SetPath(c.serverAddr, p)
+		// appnet.SetPath(c.serverAddr, p)
+		c.serverAddr.Path = p.Path()
+		c.serverAddr.NextHop = p.OverlayNextHop()
 		message := []byte(fmt.Sprintf("this message (%d) sent using path %v", i, p))
 		_, err := conn.WriteTo(message, c.serverAddr)
+
 		if err != nil {
 			return err
 		}
@@ -155,8 +155,20 @@ func (c *client) loopSendMessages(conn *snet.Conn) error {
 }
 
 func (c *client) selectBestPath() snet.Path {
-	idx := rand.Intn(len(c.paths))
-	return c.paths[idx]
+	// idx := rand.Intn(len(c.paths))
+	// return c.paths[idx]
+	// for _, v := range c.paths.m {
+	// 	return v[0]
+	// }
+	idx := rand.Intn(c.paths.Len())
+	i := 0
+	for _, p := range c.paths.m {
+		if i == idx {
+			return p
+		}
+		i++
+	}
+	panic("no paths")
 }
 
 func check(err error) {
@@ -168,6 +180,55 @@ func check(err error) {
 var _ snet.SCMPHandler = (*client)(nil)
 
 func (c *client) Handle(pkt *snet.Packet) error {
-	fmt.Println("SCMP handle")
+	// fmt.Printf("SCMP handle. pkt = %v\n", pkt)
+	p := c.paths.Find(*pkt.PacketInfo.Path)
+	fmt.Printf("Got SCMP. Path=%v\n", p)
+	hdr, ok := pkt.L4Header.(*scmp.Hdr)
+	fmt.Printf("scmp handler. hdr = %v\nis scmp header? %v\n", hdr, ok)
+
 	return nil
+}
+
+// PathMap stores the keys as a CRC of the reversed paths.
+type PathMap struct {
+	m map[string]snet.Path
+}
+
+func newPathMap(paths []snet.Path) *PathMap {
+	m := &PathMap{
+		// m: make(map[uint32][]snet.Path),
+		m: make(map[string]snet.Path),
+	}
+	for _, p := range paths {
+		spath := p.Path().Copy()
+		if err := spath.Reverse(); err != nil {
+			panic(err)
+		}
+		key := string(spath.Raw)
+		m.m[key] = p
+	}
+	return m
+}
+
+func (m *PathMap) Len() int {
+	return len(m.m)
+}
+
+// Find finds a path.
+func (m *PathMap) Find(p spath.Path) snet.Path {
+	fmt.Printf("looking for:\n: %s\n", hex.EncodeToString(p.Raw))
+	m.debugPrint()
+	key := string(p.Raw)
+	stored, found := m.m[key]
+	if !found {
+		return nil
+	}
+	fmt.Printf("FOUND!!  %v\n", stored)
+	return stored
+}
+
+func (m *PathMap) debugPrint() {
+	for k := range m.m {
+		fmt.Printf("> %s\n", hex.EncodeToString([]byte(k)))
+	}
 }
