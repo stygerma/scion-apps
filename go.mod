@@ -20,3 +20,5 @@ require (
 	golang.org/x/image v0.0.0-20191009234506-e7c1f5e7dbb8
 	gopkg.in/alecthomas/kingpin.v2 v2.2.6
 )
+
+replace github.com/scionproto/scion => /home/marc/go/src/github.com/scionproto/scion
